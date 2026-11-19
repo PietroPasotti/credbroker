@@ -11,29 +11,42 @@ host according to `policy.toml`.
 
 ## Requirements
 
-- Both hosts are on the same tailnet.
-- Trusted host: Linux desktop session, `gh auth login` done, `zenity`, `uv`, systemd user session.
+- Both hosts are on the same tailnet, reachable by `tailscale ip -4 <hostname>`.
+- Trusted host: Linux desktop session with `$DISPLAY` set, `gh auth login` done,
+  `zenity`, `uv`, systemd user session, and (if `ufw` is active) passwordless
+  `sudo ufw` for `init` to open the port itself — otherwise it prints the
+  exact `ufw allow` command to run manually.
 - Client: `uv` and `git`, and no GitHub credential (`gh auth logout` if one exists).
+  `~/.local/bin` must precede `/usr/bin` on `PATH` — true in login shells on Ubuntu.
 
 ## Trusted host
 
 ```sh
 uv tool install git+https://github.com/PietroPasotti/credbroker
-credbroker init --peer <CLIENT_TAILSCALE_IP>
+credbroker init --peer <client-hostname-or-ip>
 ```
 
-Then: if `ufw` is active, run
-`sudo ufw allow in on tailscale0 from <CLIENT_TAILSCALE_IP> to any port 8765 proto tcp`.
-Edit `~/.config/credbroker/policy.toml` to taste, then `systemctl --user restart credbroker`.
+`--peer` accepts a tailscale MagicDNS hostname (resolved for you) or a literal
+IP; pass it more than once for multiple clients. `init` is safe to re-run: it
+regenerates the systemd unit and restarts the service every time (briefly
+interrupting in-flight requests), but only touches `policy.toml` when
+`--force` is given — an existing policy is left alone. Its last line of
+output is the exact command to run on that client next; copy it. Then edit
+`~/.config/credbroker/policy.toml` to taste and `systemctl --user restart
+credbroker`.
+
+Check it's up: `systemctl --user is-active credbroker`.
 
 ## Client
 
 ```sh
 uv tool install git+https://github.com/PietroPasotti/credbroker
-credbroker client-install --broker http://<BROKER_TAILSCALE_IP>:8765
+credbroker client-install --broker http://<broker-hostname-or-ip>:8765
 ```
 
-Note: `~/.local/bin` must precede `/usr/bin` on PATH; it does in login shells on Ubuntu.
+`client-install` prints `done; test with: gh repo view PietroPasotti/credbroker`
+— run it. A command denied by policy exits `77` with `credx: denied by
+credbroker` on stderr (e.g. `gh api` is denied by default, see Caveats).
 
 ## Workshop container
 
@@ -68,6 +81,11 @@ from the client host's tailnet IP, so `allowed_peers` needs no change.
 ## Policy reference
 
 - Keys: `listen`, `allowed_peers`, `default` (`deny|ask`), `prompt_timeout`, `command_timeout`.
+- `init` generates a policy with `default = "deny"`, `prompt_timeout = 120`,
+  `command_timeout = 300`, a pre-seeded `[[git]]` fetch-allow rule for
+  `PietroPasotti/credbroker` itself (required so `uv tool upgrade` keeps
+  working — see Upgrade below), plus starter `[[exec]]` rules for common
+  read-only `gh` subcommands (`pr view/list/diff`, `issue view/list`, …).
 - `[[exec]] args, action`: a prefix after `gh`.
 - `[[git]] repo` (fnmatch on `owner/name`), `op` (`fetch|push`), `refs` (push only), `action` (`allow|deny|ask`).
 - First match wins. Audit log: `~/.local/state/credbroker/audit.jsonl`.
@@ -88,4 +106,6 @@ restarts the service).
 If `uv tool install`/`upgrade` on a client does not honor git `insteadOf`
 (uv's git fetch bypasses it) and fails, rerun with
 `GIT_CONFIG_GLOBAL=/dev/null`. The repo is public, so the direct fetch
-works.
+works. Either way, upgrading depends on the `PietroPasotti/credbroker`
+fetch-allow rule staying in `policy.toml` (see Policy reference) — don't
+remove it when editing the policy to taste.
