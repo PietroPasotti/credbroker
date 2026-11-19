@@ -1,0 +1,90 @@
+# credbroker policy. First matching rule wins; otherwise "default". Restart after edits: systemctl --user restart credbroker
+listen = "{listen}"
+allowed_peers = [{peers}]
+default = "deny"
+prompt_timeout = 120
+command_timeout = 300
+
+[[exec]]
+args = ["pr", "view"]
+action = "allow"
+
+[[exec]]
+args = ["pr", "list"]
+action = "allow"
+
+[[exec]]
+args = ["pr", "diff"]
+action = "allow"
+
+[[exec]]
+args = ["pr", "checks"]
+action = "allow"
+
+[[exec]]
+args = ["issue", "view"]
+action = "allow"
+
+[[exec]]
+args = ["issue", "list"]
+action = "allow"
+
+[[exec]]
+args = ["run", "view"]
+action = "allow"
+
+[[exec]]
+args = ["run", "list"]
+action = "allow"
+
+[[exec]]
+args = ["repo", "view"]
+action = "allow"
+
+[[exec]]
+args = ["pr", "create"]
+action = "ask"
+
+[[exec]]
+args = ["pr", "comment"]
+action = "ask"
+
+[[exec]]
+args = ["pr", "review"]
+action = "ask"
+
+[[exec]]
+args = ["pr", "edit"]
+action = "ask"
+
+[[exec]]
+args = ["pr", "merge"]
+action = "deny"
+
+[[exec]]
+args = ["repo", "delete"]
+action = "deny"
+
+[[exec]]
+args = ["auth"]
+action = "deny"
+
+[[exec]]
+args = ["api"]
+action = "deny"
+
+[[git]]
+repo = "PietroPasotti/credbroker"
+op = "fetch"
+action = "allow"
+
+[[git]]
+repo = "canonical/*"
+op = "fetch"
+action = "allow"
+
+[[git]]
+repo = "canonical/*"
+op = "push"
+refs = ["refs/heads/*"]
+action = "ask"
