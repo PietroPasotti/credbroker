@@ -89,3 +89,5 @@ If `uv tool install`/`upgrade` on a client does not honor git `insteadOf`
 (uv's git fetch bypasses it) and fails, rerun with
 `GIT_CONFIG_GLOBAL=/dev/null`. The repo is public, so the direct fetch
 works.
+
+<!-- smoke-test: credbroker ask-flow verification, safe to ignore -->
