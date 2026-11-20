@@ -27,7 +27,7 @@ AUDIT_PATH = os.path.join(AUDIT_DIR, "audit.jsonl")
 CREDX_PATH = os.path.join(os.path.dirname(__file__), "credx.py")
 
 ALLOWED_ACTIONS = {"allow", "deny", "ask"}
-ALLOWED_TOP_KEYS = {"listen", "allowed_peers", "default", "prompt_timeout", "command_timeout", "exec", "git"}
+ALLOWED_TOP_KEYS = {"listen", "allowed_peers", "default", "prompt_timeout", "command_timeout", "prompt_backend", "exec", "git"}
 ALLOWED_EXEC_KEYS = {"args", "action"}
 ALLOWED_GIT_KEYS = {"repo", "op", "refs", "action"}
 
@@ -64,6 +64,11 @@ def load_policy(path: str) -> dict:
     policy.setdefault("allowed_peers", [])
     policy.setdefault("prompt_timeout", 120)
     policy.setdefault("command_timeout", 300)
+    policy.setdefault("prompt_backend", "zenity")
+    if policy["prompt_backend"] not in ("zenity", "notify-send"):
+        raise PolicyError(
+            f"policy 'prompt_backend' must be 'zenity' or 'notify-send', got {policy['prompt_backend']!r}"
+        )
     policy.setdefault("exec", [])
     policy.setdefault("git", [])
 
@@ -141,22 +146,48 @@ def match_git(repo, op, refs=None):
     return POLICY["default"], "default"
 
 
+def _prompt_zenity(summary):
+    result = subprocess.run(
+        [
+            "zenity",
+            "--question",
+            "--title=credbroker",
+            "--width=600",
+            "--no-markup",
+            f"--timeout={POLICY['prompt_timeout']}",
+            f"--text={summary}",
+        ],
+        timeout=POLICY["prompt_timeout"] + 10,
+    )
+    return result.returncode == 0
+
+
+def _prompt_notify_send(summary):
+    # notify-send escapes HTML unless told otherwise; the notification server
+    # here advertises body-markup, so escape attacker-controlled text ourselves.
+    escaped = summary.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    result = subprocess.run(
+        [
+            "notify-send",
+            "--urgency=critical",
+            f"--expire-time={POLICY['prompt_timeout'] * 1000}",
+            "--action=allow=Allow",
+            "--action=deny=Deny",
+            "credbroker",
+            escaped,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=POLICY["prompt_timeout"] + 10,
+    )
+    return result.stdout.strip() == "allow"
+
+
 def do_prompt(summary):
+    backend = _prompt_notify_send if POLICY["prompt_backend"] == "notify-send" else _prompt_zenity
     with prompt_lock:
         try:
-            result = subprocess.run(
-                [
-                    "zenity",
-                    "--question",
-                    "--title=credbroker",
-                    "--width=600",
-                    "--no-markup",
-                    f"--timeout={POLICY['prompt_timeout']}",
-                    f"--text={summary}",
-                ],
-                timeout=POLICY["prompt_timeout"] + 10,
-            )
-            return result.returncode == 0
+            return backend(summary)
         except Exception:
             return False
 
@@ -508,6 +539,8 @@ def serve(policy_path: str) -> None:
     GH = shutil.which("gh") or ""
     if not GH:
         raise PolicyError("gh not found on PATH")
+    if shutil.which(POLICY["prompt_backend"]) is None:
+        raise PolicyError(f"prompt_backend {POLICY['prompt_backend']!r} not found on PATH")
     host, _, port = POLICY["listen"].rpartition(":")
     server = ThreadingHTTPServer((host, int(port)), Handler)
     server.serve_forever()

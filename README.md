@@ -6,14 +6,17 @@ Policy-gated GitHub credential broker: `gh` and `git` for credential-less hosts.
 
 The trusted host keeps the GitHub token. Clients run `gh`/`git` normally,
 but every credentialed request is routed through the broker over HTTP.
-Each request is allowed, denied, or prompted via zenity on the trusted
-host according to `policy.toml`.
+Each request is allowed, denied, or prompted on the trusted host's desktop
+according to `policy.toml` — either a blocking `zenity` dialog or a native
+desktop notification with Allow/Deny buttons (`notify-send`), your choice.
 
 ## Requirements
 
 - Both hosts are on the same tailnet, reachable by `tailscale ip -4 <hostname>`.
 - Trusted host: Linux desktop session with `$DISPLAY` set, `gh auth login` done,
-  `zenity`, `uv`, systemd user session, and (if `ufw` is active) passwordless
+  `uv`, systemd user session, and whichever prompt backend you pick — `zenity`
+  (default) or `notify-send`/`libnotify-bin` (needs a notification daemon that
+  supports actions; GNOME Shell does) — and (if `ufw` is active) passwordless
   `sudo ufw` for `init` to open the port itself — otherwise it prints the
   exact `ufw allow` command to run manually.
 - Client: `uv` and `git`, and no GitHub credential (`gh auth logout` if one exists).
@@ -23,7 +26,7 @@ host according to `policy.toml`.
 
 ```sh
 uv tool install git+https://github.com/PietroPasotti/credbroker
-credbroker init --peer <client-hostname-or-ip>
+credbroker init --peer <client-hostname-or-ip> [--prompt-backend notify-send]
 ```
 
 `--peer` accepts a tailscale MagicDNS hostname (resolved for you) or a literal
@@ -80,12 +83,15 @@ from the client host's tailnet IP, so `allowed_peers` needs no change.
 
 ## Policy reference
 
-- Keys: `listen`, `allowed_peers`, `default` (`deny|ask`), `prompt_timeout`, `command_timeout`.
+- Keys: `listen`, `allowed_peers`, `default` (`deny|ask`), `prompt_timeout`, `command_timeout`, `prompt_backend` (`zenity|notify-send`).
 - `init` generates a policy with `default = "deny"`, `prompt_timeout = 120`,
-  `command_timeout = 300`, a pre-seeded `[[git]]` fetch-allow rule for
+  `command_timeout = 300`, `prompt_backend = "zenity"` (or whatever
+  `--prompt-backend` was passed), a pre-seeded `[[git]]` fetch-allow rule for
   `PietroPasotti/credbroker` itself (required so `uv tool upgrade` keeps
   working — see Upgrade below), plus starter `[[exec]]` rules for common
-  read-only `gh` subcommands (`pr view/list/diff`, `issue view/list`, …).
+  read-only `gh` subcommands (`pr view/list/diff`, `issue view/list`, …). To
+  switch backends later, edit `prompt_backend` in `policy.toml` directly and
+  `systemctl --user restart credbroker` — no need to re-run `init --force`.
 - `[[exec]] args, action`: a prefix after `gh`.
 - `[[git]] repo` (fnmatch on `owner/name`), `op` (`fetch|push`), `refs` (push only), `action` (`allow|deny|ask`).
 - First match wins. Audit log: `~/.local/state/credbroker/audit.jsonl`.
@@ -96,6 +102,11 @@ from the client host's tailnet IP, so `allowed_peers` needs no change.
 - `gh` output is buffered, so interactive `gh` (no flags, needing a TTY) won't work.
 - `ask` resolves to deny on timeout or when there is no display.
 - `gh api` is denied by default because it can do anything.
+- `prompt_backend = "notify-send"` needs a notification daemon advertising the
+  `actions` capability (check with `dbus-send --session --print-reply
+  --dest=org.freedesktop.Notifications /org/freedesktop/Notifications
+  org.freedesktop.Notifications.GetCapabilities`); GNOME Shell has this, some
+  minimal/tiling-WM notification daemons don't — fall back to `zenity` there.
 
 ## Upgrade
 

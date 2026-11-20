@@ -60,8 +60,9 @@ def cmd_init(args: argparse.Namespace) -> None:
         ["gh", "auth", "token"], capture_output=True
     ).returncode != 0:
         fail("gh is not authenticated; run 'gh auth login' first")
-    if shutil.which("zenity") is None:
-        fail("zenity not found; install it (apt install zenity)")
+    if shutil.which(args.prompt_backend) is None:
+        hint = "apt install zenity" if args.prompt_backend == "zenity" else "apt install libnotify-bin"
+        fail(f"{args.prompt_backend} not found; install it ({hint})")
     if shutil.which("systemctl") is None:
         fail("systemctl not found")
 
@@ -81,16 +82,24 @@ def cmd_init(args: argparse.Namespace) -> None:
         print(f"policy exists, keeping {policy_path}")
         print(
             "note: pass --force to regenerate from the template "
-            "(defaults: default=deny, prompt_timeout=120s, command_timeout=300s)"
+            f"(defaults: default=deny, prompt_timeout=120s, command_timeout=300s, "
+            f"prompt_backend={args.prompt_backend})"
         )
     else:
         os.makedirs(os.path.dirname(policy_path), exist_ok=True)
         with open(TEMPLATE_PATH) as f:
             template = f.read()
-        content = template.format(listen=listen, peers=", ".join(json.dumps(p) for p in peers))
+        content = template.format(
+            listen=listen,
+            peers=", ".join(json.dumps(p) for p in peers),
+            prompt_backend=args.prompt_backend,
+        )
         with open(policy_path, "w") as f:
             f.write(content)
-        print(f"wrote {policy_path} (default=deny, prompt_timeout=120s, command_timeout=300s)")
+        print(
+            f"wrote {policy_path} (default=deny, prompt_timeout=120s, "
+            f"command_timeout=300s, prompt_backend={args.prompt_backend})"
+        )
 
     # 4. Unit file
     exe = shutil.which("credbroker") or os.path.abspath(sys.argv[0])
@@ -187,6 +196,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("--peer", action="append", required=True)
     p_init.add_argument("--listen", default=None)
     p_init.add_argument("--force", action="store_true")
+    p_init.add_argument(
+        "--prompt-backend",
+        choices=["zenity", "notify-send"],
+        default="zenity",
+        help="how to ask: a blocking zenity dialog, or a native desktop notification with Allow/Deny actions",
+    )
     p_init.set_defaults(func=cmd_init)
 
     p_client = sub.add_parser("client-install", help="set up a client host")

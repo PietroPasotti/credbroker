@@ -77,6 +77,55 @@ def test_load_policy_rejects_default_allow(tmp_path):
         server.load_policy(str(p))
 
 
+def test_load_policy_defaults_prompt_backend_to_zenity(tmp_path):
+    p = tmp_path / "p.toml"
+    p.write_text('listen = "x:1"\ndefault = "deny"\n')
+    assert server.load_policy(str(p))["prompt_backend"] == "zenity"
+
+
+def test_load_policy_rejects_bad_prompt_backend(tmp_path):
+    p = tmp_path / "p.toml"
+    p.write_text('listen = "x:1"\ndefault = "deny"\nprompt_backend = "espeak"\n')
+    with pytest.raises(server.PolicyError):
+        server.load_policy(str(p))
+
+
+def test_do_prompt_dispatches_to_configured_backend(monkeypatch):
+    monkeypatch.setattr(server, "POLICY", {"prompt_backend": "notify-send", "prompt_timeout": 1})
+    calls = []
+    monkeypatch.setattr(server, "_prompt_zenity", lambda summary: calls.append("zenity") or True)
+    monkeypatch.setattr(server, "_prompt_notify_send", lambda summary: calls.append("notify-send") or True)
+
+    assert server.do_prompt("peer: 1.2.3.4") is True
+    assert calls == ["notify-send"]
+
+
+def test_prompt_notify_send_parses_allow_action(monkeypatch):
+    monkeypatch.setattr(server, "POLICY", {"prompt_timeout": 1})
+
+    class FakeResult:
+        stdout = "allow\n"
+
+    monkeypatch.setattr(server.subprocess, "run", lambda *a, **k: FakeResult())
+    assert server._prompt_notify_send("peer: 1.2.3.4\ngh pr merge") is True
+
+
+def test_prompt_notify_send_escapes_markup(monkeypatch):
+    monkeypatch.setattr(server, "POLICY", {"prompt_timeout": 1})
+    captured = {}
+
+    class FakeResult:
+        stdout = "deny\n"
+
+    def fake_run(args, **kwargs):
+        captured["body"] = args[-1]
+        return FakeResult()
+
+    monkeypatch.setattr(server.subprocess, "run", fake_run)
+    server._prompt_notify_send("<script>&boom</script>")
+    assert captured["body"] == "&lt;script&gt;&amp;boom&lt;/script&gt;"
+
+
 class _StubHandler:
     headers = {}
 
