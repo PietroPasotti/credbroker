@@ -3,7 +3,7 @@
 
 Runs on a trusted host. Callers never see a GitHub credential; this
 process holds it and decides per-request whether to allow, deny, or
-prompt via zenity.
+prompt on the desktop (notify-send by default, or zenity).
 """
 import base64
 import fnmatch
@@ -41,6 +41,11 @@ class PolicyError(Exception):
     pass
 
 
+def default_prompt_backend() -> str:
+    """Prefer notify-send (native desktop toast) when it's on PATH; fall back to zenity."""
+    return "notify-send" if shutil.which("notify-send") else "zenity"
+
+
 def load_policy(path: str) -> dict:
     try:
         with open(path, "rb") as f:
@@ -64,7 +69,7 @@ def load_policy(path: str) -> dict:
     policy.setdefault("allowed_peers", [])
     policy.setdefault("prompt_timeout", 120)
     policy.setdefault("command_timeout", 300)
-    policy.setdefault("prompt_backend", "zenity")
+    policy.setdefault("prompt_backend", default_prompt_backend())
     if policy["prompt_backend"] not in ("zenity", "notify-send"):
         raise PolicyError(
             f"policy 'prompt_backend' must be 'zenity' or 'notify-send', got {policy['prompt_backend']!r}"

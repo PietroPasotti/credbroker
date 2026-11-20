@@ -77,9 +77,24 @@ def test_load_policy_rejects_default_allow(tmp_path):
         server.load_policy(str(p))
 
 
-def test_load_policy_defaults_prompt_backend_to_zenity(tmp_path):
+def test_load_policy_defaults_prompt_backend_to_notify_send_when_available(tmp_path, monkeypatch):
+    monkeypatch.setattr(server.shutil, "which", lambda name: "/usr/bin/notify-send" if name == "notify-send" else None)
     p = tmp_path / "p.toml"
     p.write_text('listen = "x:1"\ndefault = "deny"\n')
+    assert server.load_policy(str(p))["prompt_backend"] == "notify-send"
+
+
+def test_load_policy_defaults_prompt_backend_to_zenity_when_notify_send_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(server.shutil, "which", lambda name: None)
+    p = tmp_path / "p.toml"
+    p.write_text('listen = "x:1"\ndefault = "deny"\n')
+    assert server.load_policy(str(p))["prompt_backend"] == "zenity"
+
+
+def test_load_policy_explicit_prompt_backend_overrides_autodetect(tmp_path, monkeypatch):
+    monkeypatch.setattr(server.shutil, "which", lambda name: "/usr/bin/notify-send")
+    p = tmp_path / "p.toml"
+    p.write_text('listen = "x:1"\ndefault = "deny"\nprompt_backend = "zenity"\n')
     assert server.load_policy(str(p))["prompt_backend"] == "zenity"
 
 

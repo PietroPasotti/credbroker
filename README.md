@@ -7,18 +7,20 @@ Policy-gated GitHub credential broker: `gh` and `git` for credential-less hosts.
 The trusted host keeps the GitHub token. Clients run `gh`/`git` normally,
 but every credentialed request is routed through the broker over HTTP.
 Each request is allowed, denied, or prompted on the trusted host's desktop
-according to `policy.toml` — either a blocking `zenity` dialog or a native
-desktop notification with Allow/Deny buttons (`notify-send`), your choice.
+according to `policy.toml` — by default a native notification with Allow/Deny
+buttons (`notify-send`), falling back to a blocking `zenity` dialog if
+`notify-send` isn't installed; either can be forced explicitly.
 
 ## Requirements
 
 - Both hosts are on the same tailnet, reachable by `tailscale ip -4 <hostname>`.
 - Trusted host: Linux desktop session with `$DISPLAY` set, `gh auth login` done,
-  `uv`, systemd user session, and whichever prompt backend you pick — `zenity`
-  (default) or `notify-send`/`libnotify-bin` (needs a notification daemon that
-  supports actions; GNOME Shell does) — and (if `ufw` is active) passwordless
-  `sudo ufw` for `init` to open the port itself — otherwise it prints the
-  exact `ufw allow` command to run manually.
+  `uv`, systemd user session, and a prompt backend: `notify-send`/
+  `libnotify-bin` is used automatically if present (needs a notification
+  daemon that supports actions — GNOME Shell does), otherwise `zenity` is
+  used — and (if `ufw` is active) passwordless `sudo ufw` for `init` to open
+  the port itself, otherwise it prints the exact `ufw allow` command to run
+  manually.
 - Client: `uv` and `git`, and no GitHub credential (`gh auth logout` if one exists).
   `~/.local/bin` must precede `/usr/bin` on `PATH` — true in login shells on Ubuntu.
 
@@ -26,7 +28,7 @@ desktop notification with Allow/Deny buttons (`notify-send`), your choice.
 
 ```sh
 uv tool install git+https://github.com/PietroPasotti/credbroker
-credbroker init --peer <client-hostname-or-ip> [--prompt-backend notify-send]
+credbroker init --peer <client-hostname-or-ip> [--prompt-backend zenity]
 ```
 
 `--peer` accepts a tailscale MagicDNS hostname (resolved for you) or a literal
@@ -85,8 +87,9 @@ from the client host's tailnet IP, so `allowed_peers` needs no change.
 
 - Keys: `listen`, `allowed_peers`, `default` (`deny|ask`), `prompt_timeout`, `command_timeout`, `prompt_backend` (`zenity|notify-send`).
 - `init` generates a policy with `default = "deny"`, `prompt_timeout = 120`,
-  `command_timeout = 300`, `prompt_backend = "zenity"` (or whatever
-  `--prompt-backend` was passed), a pre-seeded `[[git]]` fetch-allow rule for
+  `command_timeout = 300`, `prompt_backend` set to whatever `--prompt-backend`
+  was passed, or auto-detected (`notify-send` if installed, else `zenity`),
+  a pre-seeded `[[git]]` fetch-allow rule for
   `PietroPasotti/credbroker` itself (required so `uv tool upgrade` keeps
   working — see Upgrade below), plus starter `[[exec]]` rules for common
   read-only `gh` subcommands (`pr view/list/diff`, `issue view/list`, …). To
