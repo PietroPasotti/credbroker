@@ -40,6 +40,11 @@ function requestText(kind, detail) {
   return JSON.stringify(detail);
 }
 
+function peerLabel(state, peer) {
+  const name = state.peer_names && state.peer_names[peer];
+  return name ? `${name} (${peer})` : peer;
+}
+
 function distinctAgents(state) {
   const agents = new Set();
   for (const item of state.pending) if (item.agent) agents.add(item.agent);
@@ -95,7 +100,7 @@ function renderPending(state) {
     row.appendChild(td(Math.max(0, now - item.created).toFixed(0)));
     row.appendChild(td(Math.max(0, item.expires - now).toFixed(0)));
     row.appendChild(td(item.agent ?? "?"));
-    row.appendChild(td(item.peer));
+    row.appendChild(td(peerLabel(state, item.peer)));
     row.appendChild(td(item.kind));
     row.appendChild(td(requestText(item.kind, item.detail)));
 
@@ -122,7 +127,6 @@ function renderPending(state) {
   approveAllBtn.textContent = `Approve all (${visible.length})`;
   approveAllBtn.onclick = () => {
     if (visible.length === 0) return;
-    if (!confirm(`Approve ${visible.length} requests?`)) return;
     resolveIds(visible.map((item) => item.id), "allow");
   };
 }
@@ -135,7 +139,7 @@ function renderHistory(state) {
     const row = document.createElement("tr");
     row.appendChild(td(entry.ts));
     row.appendChild(td(entry.agent ?? "?"));
-    row.appendChild(td(entry.peer));
+    row.appendChild(td(peerLabel(state, entry.peer)));
     row.appendChild(td(entry.kind));
     row.appendChild(td(requestText(entry.kind, entry.detail)));
     row.appendChild(td(entry.decision));

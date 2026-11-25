@@ -155,6 +155,20 @@ def test_get_state_marks_gui_as_open(running_gui):
     assert server.BOARD.gui_open() is True
 
 
+def test_get_state_includes_peer_names_from_policy(running_gui, monkeypatch):
+    address, _p = running_gui
+    monkeypatch.setitem(server.POLICY, "peer_names", {"10.0.0.1": "darkmoon-vm"})
+    conn = _conn(address)
+    try:
+        conn.request("GET", "/api/state")
+        resp = conn.getresponse()
+        body = json.loads(resp.read())
+    finally:
+        conn.close()
+    assert resp.status == 200
+    assert body["peer_names"] == {"10.0.0.1": "darkmoon-vm"}
+
+
 def test_settings_toggles_notify_while_open(running_gui):
     address, _p = running_gui
     conn = _conn(address)

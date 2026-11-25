@@ -120,6 +120,7 @@ class GuiHandler(server.Handler):
                 "now": time.time(),
                 "prompt_backend": server.POLICY["prompt_backend"],
                 "policy_status": server.POLICY_STATUS,
+                "peer_names": server.POLICY.get("peer_names", {}),
             },
         )
 
