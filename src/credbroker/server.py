@@ -31,6 +31,10 @@ ALLOWED_TOP_KEYS = {"listen", "allowed_peers", "default", "prompt_timeout", "com
 ALLOWED_EXEC_KEYS = {"args", "action"}
 ALLOWED_GIT_KEYS = {"repo", "op", "refs", "action"}
 
+# GitHub caps PR/issue bodies at 65536 chars (<=262144 bytes of UTF-8); base64
+# inflates raw bytes by 4/3, plus JSON wrapper overhead — give real bodies room.
+EXEC_REQUEST_LIMIT = 400_000
+
 prompt_lock = threading.Lock()
 fetch_cache = {}  # (peer, repo) -> expiry epoch
 fetch_cache_lock = threading.Lock()
@@ -203,10 +207,17 @@ def shell_quote_join(args):
     return " ".join(shlex.quote(a) for a in args)
 
 
-def decide_exec(peer, args, reason):
+def gh_stdin_kwargs(stdin_bytes):
+    """subprocess.run kwargs: pipe stdin_bytes in, or /dev/null if there's none."""
+    return {"input": stdin_bytes} if stdin_bytes is not None else {"stdin": subprocess.DEVNULL}
+
+
+def decide_exec(peer, args, reason, stdin_preview=None):
     action, via = match_exec(args)
     if action == "ask":
         summary_lines = [f"peer: {peer}", f"gh {shell_quote_join(args)}"]
+        if stdin_preview:
+            summary_lines.append(f"stdin: {stdin_preview}")
         if reason:
             summary_lines.append(f"reason: {reason}")
         allowed = do_prompt("\n".join(summary_lines))
@@ -338,10 +349,12 @@ class Handler(BaseHTTPRequestHandler):
     def handle_exec(self):
         peer = self.client_address[0]
         try:
-            raw = self.read_body(limit=65536)
+            raw = self.read_body(limit=EXEC_REQUEST_LIMIT)
             req = json.loads(raw)
             args = req["args"]
             reason = req.get("reason")
+            stdin_b64 = req.get("stdin")
+            stdin_bytes = base64.b64decode(stdin_b64, validate=True) if stdin_b64 is not None else None
             if not isinstance(args, list) or len(args) == 0 or len(args) > 256:
                 raise ValueError("bad args")
             if not all(isinstance(a, str) and "\0" not in a for a in args):
@@ -356,15 +369,22 @@ class Handler(BaseHTTPRequestHandler):
             audit(peer, "exec", {"args": args}, "deny", "default")
             return self.send_json(403, {"error": "denied"})
 
-        decision, via = decide_exec(peer, rest, reason)
+        stdin_preview = stdin_bytes.decode("utf-8", "replace")[:500] if stdin_bytes else None
+        decision, via = decide_exec(peer, rest, reason, stdin_preview)
         if decision != "allow":
-            audit(peer, "exec", {"args": args, "reason": reason}, "deny", via)
+            audit(
+                peer,
+                "exec",
+                {"args": args, "reason": reason, "stdin_bytes": len(stdin_bytes) if stdin_bytes is not None else 0},
+                "deny",
+                via,
+            )
             return self.send_json(403, {"error": "denied"})
 
         try:
             result = subprocess.run(
                 [GH, *rest],
-                stdin=subprocess.DEVNULL,
+                **gh_stdin_kwargs(stdin_bytes),
                 capture_output=True,
                 timeout=POLICY["command_timeout"],
                 cwd=HOME,
@@ -377,7 +397,14 @@ class Handler(BaseHTTPRequestHandler):
             stdout_b = b""
             stderr_b = b"credbroker: command timed out\n"
 
-        audit(peer, "exec", {"args": args, "reason": reason}, "allow", via, exit_code=exit_code)
+        audit(
+            peer,
+            "exec",
+            {"args": args, "reason": reason, "stdin_bytes": len(stdin_bytes) if stdin_bytes is not None else 0},
+            "allow",
+            via,
+            exit_code=exit_code,
+        )
         self.send_json(
             200,
             {

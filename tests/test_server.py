@@ -1,8 +1,9 @@
 """Tests for credbroker.server policy engine and pkt-line parsing."""
+import subprocess
+
 import pytest
 
 from credbroker import server
-
 
 FIXTURE_TOML = """
 listen = "127.0.0.1:8765"
@@ -113,6 +114,35 @@ def test_do_prompt_dispatches_to_configured_backend(monkeypatch):
 
     assert server.do_prompt("peer: 1.2.3.4") is True
     assert calls == ["notify-send"]
+
+
+def test_gh_stdin_kwargs_none_uses_devnull():
+    assert server.gh_stdin_kwargs(None) == {"stdin": subprocess.DEVNULL}
+
+
+def test_gh_stdin_kwargs_bytes_pipes_as_input():
+    assert server.gh_stdin_kwargs(b"x") == {"input": b"x"}
+
+
+def test_decide_exec_ask_prompt_includes_stdin_preview(monkeypatch):
+    monkeypatch.setattr(server, "POLICY", {"exec": [], "default": "ask"})
+    captured = {}
+    monkeypatch.setattr(server, "do_prompt", lambda summary: captured.setdefault("summary", summary) or True)
+
+    action, via = server.decide_exec("1.2.3.4", ["pr", "create"], None, stdin_preview="## test body")
+
+    assert (action, via) == ("allow", "prompt")
+    assert "stdin: ## test body" in captured["summary"]
+
+
+def test_decide_exec_ask_prompt_omits_stdin_line_when_no_preview(monkeypatch):
+    monkeypatch.setattr(server, "POLICY", {"exec": [], "default": "ask"})
+    captured = {}
+    monkeypatch.setattr(server, "do_prompt", lambda summary: captured.setdefault("summary", summary) or True)
+
+    server.decide_exec("1.2.3.4", ["pr", "create"], None)
+
+    assert "stdin:" not in captured["summary"]
 
 
 def test_prompt_notify_send_parses_allow_action(monkeypatch):

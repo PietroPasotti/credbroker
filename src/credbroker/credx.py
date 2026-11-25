@@ -13,6 +13,47 @@ import sys
 import urllib.error
 import urllib.request
 
+BODY_FILE_FLAGS = ("--body-file", "--notes-file", "-F")
+
+
+def extract_body_stdin(args):
+    """Rewrite the first --body-file/--notes-file/-F occurrence to read from
+    stdin, returning (possibly-rewritten args, raw body bytes or None).
+
+    Mirrors gh's own "-F -" contract: "-" means read local stdin (exactly what
+    unshimmed gh would do); any other value is a local file path that only
+    exists on this (client) host, so it must be read here and forwarded,
+    because the broker runs gh on a different machine. Only the --flag value /
+    --flag=value forms are recognized (no "-Fvalue" concatenated shorthand —
+    not seen in practice and ambiguous with other shorthand clusters).
+    """
+    for i, arg in enumerate(args):
+        flag = value = value_index = None
+        if arg in BODY_FILE_FLAGS and i + 1 < len(args):
+            flag, value, value_index = arg, args[i + 1], i + 1
+        elif "=" in arg:
+            head, _, tail = arg.partition("=")
+            if head in BODY_FILE_FLAGS:
+                flag, value, value_index = head, tail, i
+        if flag is None:
+            continue
+        if value == "-":
+            data = sys.stdin.buffer.read()
+        else:
+            try:
+                with open(value, "rb") as f:
+                    data = f.read()
+            except OSError as e:
+                print(f"credx: {e}", file=sys.stderr)
+                sys.exit(1)
+        new_args = list(args)
+        if value_index != i:
+            new_args[value_index] = "-"
+        else:
+            new_args[i] = f"{flag}=-"
+        return new_args, data
+    return args, None
+
 
 def broker_url() -> str:
     env = os.environ.get("CREDBROKER_URL", "")
@@ -58,11 +99,15 @@ def main():
         print("credx: usage: credx [--reason TEXT] -- gh ARGS...", file=sys.stderr)
         sys.exit(125)
 
+    args, stdin_bytes = extract_body_stdin(args)
+
     broker = broker_url()
 
     payload = {"args": args}
     if reason:
         payload["reason"] = reason
+    if stdin_bytes is not None:
+        payload["stdin"] = base64.b64encode(stdin_bytes).decode()
 
     data = json.dumps(payload).encode()
     req = urllib.request.Request(
