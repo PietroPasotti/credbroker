@@ -7,6 +7,10 @@ prompt_timeout = 120
 command_timeout = 300
 prompt_backend = "{prompt_backend}"
 
+# Optional: friendly names shown in the web GUI next to raw peer IPs.
+# [peer_names]
+# "100.80.9.84" = "darkmoon-vm"
+
 [[exec]]
 args = ["pr", "view"]
 action = "allow"
