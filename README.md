@@ -15,8 +15,14 @@ same pending/history queue, a policy editor, and a toggle to suppress
 desktop notifications while the page is open — useful when several `ask`
 requests are in flight at once. `policy.toml` hot-reloads on save (from the
 GUI or any other editor); only `listen`/`gui_listen` changes need a restart.
-Every request carries a mandatory agent name (`CREDBROKER_AGENT`), shown
-next to each entry so you know which client-side agent is asking.
+Every request carries an agent identity, shown next to each entry so you
+know which client-side agent is asking. It's always present and never
+blocks a request: an explicit `--agent NAME` on `credx` wins outright;
+otherwise it's auto-derived as `{harness}:{description}`, where `harness`
+is detected from known coding-agent environment markers (`OMPCODE`,
+`CLAUDECODE`, `CODEX_HOME`, `GEMINI_CLI`, else `cli`) and `description`
+comes from `CREDBROKER_SESSION_DESCRIPTION` (free text, e.g. `"issue
+2321"`), falling back to `unknown`.
 
 ## Requirements
 
@@ -30,9 +36,7 @@ next to each entry so you know which client-side agent is asking.
   manually. `$DISPLAY` is optional: without it, `ask` prompts are answered
   from the web GUI instead of a desktop toast.
 - Client: `uv` and `git`, no GitHub credential (`gh auth logout` if one
-  exists), and `CREDBROKER_AGENT` set to a name identifying the calling
-  agent (`[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,63}`) — every request is rejected
-  without it. `~/.local/bin` must precede `/usr/bin` on `PATH` — true in
+  exists). `~/.local/bin` must precede `/usr/bin` on `PATH` — true in
   login shells on Ubuntu.
 
 ## Trusted host
@@ -60,17 +64,17 @@ uv tool install git+https://github.com/PietroPasotti/credbroker
 credbroker client-install --broker http://<broker-hostname-or-ip>:8765
 ```
 
-Set `CREDBROKER_AGENT` (e.g. in the shell profile or the calling agent's
-environment) to a name identifying the caller — every request is denied
-with `credx: agent name required; set CREDBROKER_AGENT or pass --agent
-NAME` until it's set. `client-install` also writes a `git` shim alongside
-the `gh` one, so plain `git fetch`/`push` over `insteadOf` carry the same
-agent name as an `X-Credbroker-Agent` header.
+Optionally set `CREDBROKER_SESSION_DESCRIPTION` (e.g. in the shell profile
+or the calling agent's environment) to a free-text description of what
+this session is doing — it's folded into the auto-derived agent identity
+shown in the GUI and audit log. `client-install` also writes a `git` shim
+alongside the `gh` one, so plain `git fetch`/`push` over `insteadOf` carry
+the same composed agent identity as an `X-Credbroker-Agent` header.
 
-`client-install` prints `done; test with: CREDBROKER_AGENT=me gh repo view
-PietroPasotti/credbroker` — run it. A command denied by policy exits `77`
-with `credx: denied by credbroker` on stderr (e.g. `gh api` is denied by
-default, see Caveats).
+`client-install` prints `done; test with: CREDBROKER_SESSION_DESCRIPTION=me
+gh repo view PietroPasotti/credbroker` — run it. A command denied by
+policy exits `77` with `credx: denied by credbroker` on stderr (e.g. `gh
+api` is denied by default, see Caveats).
 
 ## Workshop container
 
@@ -91,12 +95,8 @@ plug.
   chmod 755 /usr/local/bin/credx
   printf '#!/bin/sh\nexec credx -- gh "$@"\n' > /usr/local/bin/gh
   chmod 755 /usr/local/bin/gh
-  cat <<SHIM > /usr/local/bin/git
   #!/bin/sh
-  if [ -n "\$CREDBROKER_AGENT" ]; then
-    exec /usr/bin/git -c "http.$BROKER/git/.extraHeader=X-Credbroker-Agent: \$CREDBROKER_AGENT" "\$@"
-  fi
-  exec /usr/bin/git "\$@"
+  exec /usr/bin/git -c "http.$BROKER/git/.extraHeader=X-Credbroker-Agent: \$(credx --print-agent-header)" "\$@"
   SHIM
   chmod 755 /usr/local/bin/git
   git config --system credbroker.url "$BROKER"
@@ -109,11 +109,11 @@ plug.
 
 Then `workshop refresh <name>`. The container's traffic reaches the broker
 from the client host's tailnet IP, so `allowed_peers` needs no change.
-Set `CREDBROKER_AGENT` in the container environment too.
+Optionally set `CREDBROKER_SESSION_DESCRIPTION` in the container environment too.
 
 ## Policy reference
 
-- Keys: `listen`, `gui_listen`, `allowed_peers`, `default` (`deny|ask`), `prompt_timeout`, `command_timeout`, `prompt_backend` (`zenity|notify-send`).
+- Keys: `listen`, `gui_listen`, `allowed_peers`, `default` (`deny|ask`), `prompt_timeout`, `command_timeout`, `prompt_backend` (`zenity|notify-send`), `peer_names` (optional `{ip = "label"}` table, purely cosmetic in the web GUI — doesn't affect `allowed_peers` enforcement or the raw IP stored in `audit.jsonl`).
 - `init` generates a policy with `default = "deny"`, `prompt_timeout = 120`,
   `command_timeout = 300`, `prompt_backend` set to whatever `--prompt-backend`
   was passed, or auto-detected (`notify-send` if installed, else `zenity`),
@@ -158,9 +158,9 @@ browsers never answer cross-origin. Reach it over SSH port-forwarding
   --dest=org.freedesktop.Notifications /org/freedesktop/Notifications
   org.freedesktop.Notifications.GetCapabilities`); GNOME Shell has this, some
   minimal/tiling-WM notification daemons don't — fall back to `zenity` there.
-- Every request needs `CREDBROKER_AGENT` matching
-  `[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,63}`; without it the broker returns 400
-  before policy is even consulted.
+- The agent identity is informational only — a missing or malformed value
+  never blocks a request; it's sanitized and shown as `unknown:unknown`
+  in the GUI/audit log instead.
 
 ## Upgrade
 
@@ -173,8 +173,4 @@ If `uv tool install`/`upgrade` on a client does not honor git `insteadOf`
 `GIT_CONFIG_GLOBAL=/dev/null`. The repo is public, so the direct fetch
 works. Either way, upgrading depends on the `PietroPasotti/credbroker`
 fetch-allow rule staying in `policy.toml` (see Policy reference) — don't
-remove it when editing the policy to taste. If the upgrade instead fails
-with HTTP 400 (`credx: agent name required`) because `CREDBROKER_AGENT`
-isn't set in that shell, the same `GIT_CONFIG_GLOBAL=/dev/null` bypass
-works — it skips the broker (and its agent requirement) entirely for the
-public, read-only fetch.
+remove it when editing the policy to taste.
