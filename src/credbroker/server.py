@@ -43,12 +43,13 @@ ALLOWED_TOP_KEYS = {
     "gui_listen",
     "exec",
     "git",
+    "peer_names",
 }
 ALLOWED_EXEC_KEYS = {"args", "action"}
 ALLOWED_GIT_KEYS = {"repo", "op", "refs", "action"}
 
-AGENT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,63}")
-AGENT_ERROR = "credbroker: missing or invalid agent name (set CREDBROKER_AGENT)\n"
+AGENT_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+AGENT_MAX_LEN = 160
 
 # GitHub caps PR/issue bodies at 65536 chars (<=262144 bytes of UTF-8); base64
 # inflates raw bytes by 4/3, plus JSON wrapper overhead — give real bodies room.
@@ -134,6 +135,17 @@ def parse_policy(text: str, source: str) -> dict:
         if rule["action"] not in ALLOWED_ACTIONS:
             raise PolicyError(f"invalid git rule action: {rule['action']!r}")
 
+    policy.setdefault("peer_names", {})
+    if not isinstance(policy["peer_names"], dict):
+        raise PolicyError("policy 'peer_names' must be a table")
+    for ip, label in policy["peer_names"].items():
+        try:
+            ipaddress.ip_address(ip)
+        except ValueError:
+            raise PolicyError(f"invalid peer_names key (not an IP): {ip!r}")
+        if not isinstance(label, str) or not label:
+            raise PolicyError(f"peer_names[{ip!r}] must be a non-empty string")
+
     return policy
 
 
@@ -151,8 +163,13 @@ def validate_runtime(policy: dict) -> None:
         raise PolicyError(f"prompt_backend {policy['prompt_backend']!r} not found on PATH")
 
 
-def valid_agent(v) -> bool:
-    return isinstance(v, str) and AGENT_RE.fullmatch(v) is not None
+def sanitize_agent(v) -> str:
+    if not isinstance(v, str):
+        return "unknown:unknown"
+    cleaned = AGENT_CONTROL_CHARS_RE.sub("", v).strip()
+    if not cleaned:
+        return "unknown:unknown"
+    return cleaned[:AGENT_MAX_LEN]
 
 
 POLICY: dict = {}
@@ -454,10 +471,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             return self.send_text(400, "credbroker: bad request\n")
 
-        agent = req.get("agent")
-        if not valid_agent(agent):
-            audit(peer, None, "exec", {"args": args}, "deny", "no-agent")
-            return self.send_text(400, AGENT_ERROR)
+        agent = sanitize_agent(req.get("agent"))
 
         rest = args[1:]
         if args[0] != "gh":
@@ -532,10 +546,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_text(404, "not found\n")
         owner, repo, rest = parsed
         full_repo = f"{owner}/{repo}"
-        agent = self.request_agent()
-        if not valid_agent(agent):
-            audit(peer, None, "git", {"repo": full_repo, "path": rest}, "deny", "no-agent")
-            return self.send_text(400, AGENT_ERROR)
+        agent = sanitize_agent(self.request_agent())
         query = self.path.split("?", 1)[1] if "?" in self.path else ""
         if rest == "info/refs" and "service=git-upload-pack" in query:
             decision, via = decide_git(peer, agent, full_repo, "fetch")
@@ -565,10 +576,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_text(404, "not found\n")
         owner, repo, rest = parsed
         full_repo = f"{owner}/{repo}"
-        agent = self.request_agent()
-        if not valid_agent(agent):
-            audit(peer, None, "git", {"repo": full_repo, "path": rest}, "deny", "no-agent")
-            return self.send_text(400, AGENT_ERROR)
+        agent = sanitize_agent(self.request_agent())
         query = self.path.split("?", 1)[1] if "?" in self.path else ""
         body = self.read_body()
 

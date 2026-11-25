@@ -142,15 +142,23 @@ def test_validate_runtime_rejects_missing_prompt_backend_binary(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "value", ["a", "agent-1", "claude.subagent_7:x@y/z+1", "a" * 64]
+    "value, expected",
+    [
+        ("omp:issue 2321", "omp:issue 2321"),
+        ("claude-code:race condition in SlurpGrader.foo_bar()", "claude-code:race condition in SlurpGrader.foo_bar()"),
+        ("a" * 160, "a" * 160),
+        ("a" * 161, "a" * 160),
+        (None, "unknown:unknown"),
+        ("", "unknown:unknown"),
+        ("   ", "unknown:unknown"),
+        (123, "unknown:unknown"),
+        ("line1\r\nline2", "line1line2"),
+        ("bell\x07gone", "bellgone"),
+        ("tab\tgone", "tabgone"),
+    ],
 )
-def test_valid_agent_accepts(value):
-    assert server.valid_agent(value) is True
-
-
-@pytest.mark.parametrize("value", [None, "", "-leading-dash", "a" * 65, 123, " space"])
-def test_valid_agent_rejects(value):
-    assert server.valid_agent(value) is False
+def test_sanitize_agent(value, expected):
+    assert server.sanitize_agent(value) == expected
 
 
 def test_gh_stdin_kwargs_none_uses_devnull():
@@ -380,8 +388,8 @@ def running_broker(tmp_path, monkeypatch):
         thread.join(5)
 
 
-def test_handle_exec_without_agent_returns_400_with_agent_error(running_broker):
-    (host, port), _audit_path = running_broker
+def test_handle_exec_without_agent_is_sanitized_to_unknown_and_audited(running_broker):
+    (host, port), audit_path = running_broker
     conn = http.client.HTTPConnection(host, port, timeout=5)
     try:
         conn.request(
@@ -391,12 +399,13 @@ def test_handle_exec_without_agent_returns_400_with_agent_error(running_broker):
             headers={"Content-Type": "application/json"},
         )
         resp = conn.getresponse()
-        body = resp.read()
+        resp.read()
     finally:
         conn.close()
 
-    assert resp.status == 400
-    assert body == server.AGENT_ERROR.encode()
+    assert resp.status == 403  # falls through to policy: "pr merge" has no matching rule -> default deny
+    last_line = audit_path.read_text().strip().splitlines()[-1]
+    assert json.loads(last_line)["agent"] == "unknown:unknown"
 
 
 def test_handle_exec_with_agent_denied_by_default_is_audited(running_broker):
@@ -419,7 +428,7 @@ def test_handle_exec_with_agent_denied_by_default_is_audited(running_broker):
     assert json.loads(last_line)["agent"] == "alpha"
 
 
-def test_handle_git_get_info_refs_without_agent_header_returns_400(running_broker):
+def test_handle_git_get_info_refs_without_agent_header_is_sanitized_and_denied(running_broker):
     (host, port), _audit_path = running_broker
     conn = http.client.HTTPConnection(host, port, timeout=5)
     try:
@@ -429,4 +438,28 @@ def test_handle_git_get_info_refs_without_agent_header_returns_400(running_broke
     finally:
         conn.close()
 
-    assert resp.status == 400
+    assert resp.status == 403
+
+
+
+def test_parse_policy_accepts_peer_names_table():
+    text = FIXTURE_TOML + '\n[peer_names]\n"10.0.0.1" = "darkmoon-vm"\n'
+    policy = server.parse_policy(text, "test")
+    assert policy["peer_names"] == {"10.0.0.1": "darkmoon-vm"}
+
+
+def test_parse_policy_defaults_peer_names_to_empty_dict():
+    policy = server.parse_policy(FIXTURE_TOML, "test")
+    assert policy["peer_names"] == {}
+
+
+def test_parse_policy_rejects_non_ip_peer_names_key():
+    text = FIXTURE_TOML + '\n[peer_names]\nnot-an-ip = "x"\n'
+    with pytest.raises(server.PolicyError):
+        server.parse_policy(text, "test")
+
+
+def test_parse_policy_rejects_non_string_peer_names_value():
+    text = FIXTURE_TOML + '\n[peer_names]\n"10.0.0.1" = 123\n'
+    with pytest.raises(server.PolicyError):
+        server.parse_policy(text, "test")
