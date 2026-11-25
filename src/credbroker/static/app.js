@@ -224,10 +224,26 @@ async function savePolicy() {
   }
 }
 
+function openPolicyPanel() {
+  document.getElementById("policy-overlay").hidden = false;
+  loadPolicy();
+}
+
+function closePolicyPanel() {
+  document.getElementById("policy-overlay").hidden = true;
+}
+
 function setupPolicy() {
   document.getElementById("policy-save").addEventListener("click", savePolicy);
   document.getElementById("policy-reload").addEventListener("click", loadPolicy);
-  loadPolicy();
+  document.getElementById("policy-toggle").addEventListener("click", openPolicyPanel);
+  document.getElementById("policy-close").addEventListener("click", closePolicyPanel);
+  document.getElementById("policy-overlay").addEventListener("click", (e) => {
+    if (e.target.id === "policy-overlay") closePolicyPanel();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !document.getElementById("policy-overlay").hidden) closePolicyPanel();
+  });
 }
 
 function main() {

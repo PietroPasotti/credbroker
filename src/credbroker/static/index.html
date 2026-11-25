@@ -8,6 +8,7 @@
 <body>
 <header>
   <h1>credbroker <span id="backend-badge" class="badge"></span></h1>
+  <button id="policy-toggle" type="button" class="policy-toggle">Policy</button>
   <label class="toggle">
     <input type="checkbox" id="notify-toggle">
     Desktop notifications while this page is open
@@ -80,15 +81,19 @@
   </table>
 </section>
 
-<section id="policy-section">
-  <h2>Policy</h2>
-  <textarea id="policy-text" rows="20" cols="100" spellcheck="false"></textarea>
-  <div class="policy-actions">
-    <button id="policy-save" type="button">Save</button>
-    <button id="policy-reload" type="button">Reload from disk</button>
-    <span id="policy-status"></span>
-  </div>
-</section>
+<div id="policy-overlay" hidden>
+  <section id="policy-panel">
+    <h2>Policy
+      <button id="policy-close" type="button" class="panel-close">&times;</button>
+    </h2>
+    <textarea id="policy-text" rows="24" cols="100" spellcheck="false"></textarea>
+    <div class="policy-actions">
+      <button id="policy-save" type="button">Save</button>
+      <button id="policy-reload" type="button">Reload from disk</button>
+      <span id="policy-status"></span>
+    </div>
+  </section>
+</div>
 
 <script src="/app.js"></script>
 </body>
