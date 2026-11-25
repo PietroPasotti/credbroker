@@ -67,9 +67,8 @@ def test_client_install_idempotent(tmp_path):
     assert not real_git_path.startswith(str(home / ".local/bin")), (
         f"git shim resolved to itself: {real_git_path}"
     )
-    assert 'if [ -n "$CREDBROKER_AGENT" ]; then' in git_shim_text
-    assert 'extraHeader=X-Credbroker-Agent: $CREDBROKER_AGENT" "$@"' in git_shim_text
-    assert f'http.{base}.extraHeader=X-Credbroker-Agent:' in git_shim_text
+    assert "credx --print-agent-header" in git_shim_text
+    assert f'http.{base}.extraHeader=X-Credbroker-Agent: $(credx --print-agent-header)"' in git_shim_text
 
 
 def test_broker_url_env_takes_precedence(monkeypatch):

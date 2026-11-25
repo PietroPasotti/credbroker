@@ -213,16 +213,13 @@ def cmd_client_install(args: argparse.Namespace) -> None:
     with open(git_shim_path, "w") as f:
         f.write(
             "#!/bin/sh\n"
-            'if [ -n "$CREDBROKER_AGENT" ]; then\n'
-            f'  exec {quoted_real} -c "http.{base}.extraHeader=X-Credbroker-Agent: '
-            '$CREDBROKER_AGENT" "$@"\n'
-            "fi\n"
-            f'exec {quoted_real} "$@"\n'
+            f'exec {quoted_real} -c "http.{base}.extraHeader=X-Credbroker-Agent: '
+            '$(credx --print-agent-header)" "$@"\n'
         )
     os.chmod(git_shim_path, 0o755)
     print(f"wrote {git_shim_path}")
 
-    print("done; test with: CREDBROKER_AGENT=me gh repo view PietroPasotti/credbroker")
+    print("done; test with: CREDBROKER_SESSION_DESCRIPTION=me gh repo view PietroPasotti/credbroker")
 
 
 def build_parser() -> argparse.ArgumentParser:
