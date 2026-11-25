@@ -86,9 +86,70 @@ def test_broker_url_exits_125_without_env_or_git_config(monkeypatch, tmp_path):
     assert exc_info.value.code == 125
 
 
-def test_credx_main_exits_125_without_agent(monkeypatch):
-    monkeypatch.delenv("CREDBROKER_AGENT", raising=False)
-    monkeypatch.setattr(sys, "argv", ["credx", "--", "gh", "pr", "list"])
+def _clear_harness_env(monkeypatch):
+    for var in ("OMPCODE", "CLAUDECODE", "CODEX_HOME", "GEMINI_CLI", "CREDBROKER_SESSION_DESCRIPTION"):
+        monkeypatch.delenv(var, raising=False)
+
+
+def test_detect_harness_prefers_ompcode(monkeypatch):
+    _clear_harness_env(monkeypatch)
+    monkeypatch.setenv("OMPCODE", "1")
+    monkeypatch.setenv("CLAUDECODE", "1")
+    assert credx.detect_harness() == "omp"
+
+
+def test_detect_harness_falls_back_through_known_markers(monkeypatch):
+    _clear_harness_env(monkeypatch)
+    monkeypatch.setenv("CLAUDECODE", "1")
+    assert credx.detect_harness() == "claude-code"
+    monkeypatch.delenv("CLAUDECODE")
+    monkeypatch.setenv("CODEX_HOME", "/home/x/.codex")
+    assert credx.detect_harness() == "codex"
+    monkeypatch.delenv("CODEX_HOME")
+    monkeypatch.setenv("GEMINI_CLI", "1")
+    assert credx.detect_harness() == "gemini-cli"
+
+
+def test_detect_harness_defaults_to_cli(monkeypatch):
+    _clear_harness_env(monkeypatch)
+    assert credx.detect_harness() == "cli"
+
+
+def test_compose_agent_explicit_overrides_everything(monkeypatch):
+    _clear_harness_env(monkeypatch)
+    monkeypatch.setenv("OMPCODE", "1")
+    monkeypatch.setenv("CREDBROKER_SESSION_DESCRIPTION", "ignored")
+    assert credx.compose_agent(explicit="literal-name") == "literal-name"
+
+
+def test_compose_agent_uses_harness_and_description(monkeypatch):
+    _clear_harness_env(monkeypatch)
+    monkeypatch.setenv("OMPCODE", "1")
+    monkeypatch.setenv("CREDBROKER_SESSION_DESCRIPTION", "issue 2321")
+    assert credx.compose_agent() == "omp:issue 2321"
+
+
+def test_compose_agent_defaults_description_to_unknown(monkeypatch):
+    _clear_harness_env(monkeypatch)
+    assert credx.compose_agent() == "cli:unknown"
+
+
+def test_credx_print_agent_header_writes_composed_agent(monkeypatch, capsys):
+    monkeypatch.delenv("OMPCODE", raising=False)
+    monkeypatch.delenv("CLAUDECODE", raising=False)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.delenv("GEMINI_CLI", raising=False)
+    monkeypatch.setenv("CREDBROKER_SESSION_DESCRIPTION", "testing")
+    monkeypatch.setattr(sys, "argv", ["credx", "--print-agent-header"])
     with pytest.raises(SystemExit) as exc_info:
         credx.main()
-    assert exc_info.value.code == 125
+    assert exc_info.value.code == 0
+    assert capsys.readouterr().out.strip() == "cli:testing"
+
+
+def test_credx_print_agent_header_respects_explicit_agent_flag(capsys, monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["credx", "--agent", "pinned-name", "--print-agent-header"])
+    with pytest.raises(SystemExit) as exc_info:
+        credx.main()
+    assert exc_info.value.code == 0
+    assert capsys.readouterr().out.strip() == "pinned-name"
