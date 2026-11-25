@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """credx: client shim that forwards `gh` invocations to credbroker.
 
-Usage: credx [--reason TEXT] -- gh ARGS...
+Usage: credx [--agent NAME] [--reason TEXT] -- gh ARGS...
+       credx --print-agent-header   # print the composed agent string and exit
 Broker URL is resolved by broker_url(): env CREDBROKER_URL takes
-precedence, otherwise git config credbroker.url is used.
+precedence, otherwise git config credbroker.url is used. The agent
+identity is always present: an explicit --agent NAME wins outright;
+otherwise it's "{harness}:{description}", where harness is auto-detected
+from known coding-agent env markers and description comes from
+CREDBROKER_SESSION_DESCRIPTION (falling back to "unknown").
 """
 import base64
 import json
@@ -14,6 +19,28 @@ import urllib.error
 import urllib.request
 
 BODY_FILE_FLAGS = ("--body-file", "--notes-file", "-F")
+
+
+HARNESS_MARKERS = (
+    ("OMPCODE", "omp"),
+    ("CLAUDECODE", "claude-code"),
+    ("CODEX_HOME", "codex"),
+    ("GEMINI_CLI", "gemini-cli"),
+)
+
+
+def detect_harness() -> str:
+    for var, label in HARNESS_MARKERS:
+        if os.environ.get(var):
+            return label
+    return "cli"
+
+
+def compose_agent(explicit=None) -> str:
+    if explicit:
+        return explicit.strip()
+    description = os.environ.get("CREDBROKER_SESSION_DESCRIPTION", "").strip() or "unknown"
+    return f"{detect_harness()}:{description}"
 
 
 def extract_body_stdin(args):
@@ -81,29 +108,44 @@ def broker_url() -> str:
 
 def main():
     argv = sys.argv[1:]
+    agent = None
     reason = os.environ.get("CREDX_REASON")
+    print_agent_header = False
 
-    if argv[:1] == ["--reason"]:
+    while argv[:1] and argv[0] in ("--agent", "--reason", "--print-agent-header"):
+        flag = argv[0]
+        if flag == "--print-agent-header":
+            print_agent_header = True
+            argv = argv[1:]
+            continue
         if len(argv) < 2:
-            print("credx: --reason requires a value", file=sys.stderr)
+            print(f"credx: {flag} requires a value", file=sys.stderr)
             sys.exit(125)
-        reason = argv[1]
+        if flag == "--agent":
+            agent = argv[1]
+        else:
+            reason = argv[1]
         argv = argv[2:]
 
+    if print_agent_header:
+        print(compose_agent(explicit=agent))
+        sys.exit(0)
+
     if argv[:1] != ["--"]:
-        print("credx: usage: credx [--reason TEXT] -- gh ARGS...", file=sys.stderr)
+        print("credx: usage: credx [--agent NAME] [--reason TEXT] -- gh ARGS...", file=sys.stderr)
         sys.exit(125)
     args = argv[1:]
 
     if not args:
-        print("credx: usage: credx [--reason TEXT] -- gh ARGS...", file=sys.stderr)
+        print("credx: usage: credx [--agent NAME] [--reason TEXT] -- gh ARGS...", file=sys.stderr)
         sys.exit(125)
 
-    args, stdin_bytes = extract_body_stdin(args)
+    agent = compose_agent(explicit=agent)
 
+    args, stdin_bytes = extract_body_stdin(args)
     broker = broker_url()
 
-    payload = {"args": args}
+    payload = {"args": args, "agent": agent}
     if reason:
         payload["reason"] = reason
     if stdin_bytes is not None:
@@ -124,7 +166,7 @@ def main():
         if e.code == 403:
             print("credx: denied by credbroker", file=sys.stderr)
             sys.exit(77)
-        print(f"credx: {e}", file=sys.stderr)
+        print(f"credx: {e}: {e.read().decode(errors='replace').strip()}", file=sys.stderr)
         sys.exit(125)
     except Exception as e:
         print(f"credx: {e}", file=sys.stderr)

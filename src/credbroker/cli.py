@@ -4,6 +4,7 @@ import argparse
 import ipaddress
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -146,14 +147,37 @@ def cmd_init(args: argparse.Namespace) -> None:
         ["systemctl", "--user", "show-environment"], capture_output=True, text=True
     )
     if not any(line.startswith("DISPLAY=") for line in env_result.stdout.splitlines()):
-        print("warning: systemd user manager has no DISPLAY; ask prompts will auto-deny")
+        print(
+            "warning: systemd user manager has no DISPLAY; ask prompts can only be "
+            "answered from the web GUI"
+        )
 
     # 8. Client command
+    try:
+        gui = server.load_policy(policy_path)["gui_listen"]
+    except server.PolicyError:
+        gui = server.DEFAULT_GUI_LISTEN
+    print(f"web GUI on this host: http://{gui}")
     print(f"on the client run: credbroker client-install --broker http://{listen}")
 
 
 def _git_config(scope_args, *rest, check=False):
     return subprocess.run(["git", "config", *scope_args, *rest], capture_output=True, text=True, check=check)
+
+
+def _real_binary(name: str, exclude_dir: str) -> str:
+    """Find `name` on PATH, skipping `exclude_dir` (the shim's own install dir).
+
+    A plain `shutil.which` would find the shim itself on re-run.
+    """
+    exclude_real = os.path.realpath(exclude_dir)
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        if not d or os.path.realpath(d) == exclude_real:
+            continue
+        candidate = os.path.join(d, name)
+        if os.access(candidate, os.X_OK) and os.path.isfile(candidate):
+            return candidate
+    fail(f"{name} not found on PATH")
 
 
 def cmd_client_install(args: argparse.Namespace) -> None:
@@ -183,7 +207,19 @@ def cmd_client_install(args: argparse.Namespace) -> None:
     if shutil.which("credx") is None:
         print("warning: credx not on PATH; the gh shim needs it")
 
-    print("done; test with: gh repo view PietroPasotti/credbroker")
+    real_git = _real_binary("git", shimdir)
+    quoted_real = shlex.quote(real_git)
+    git_shim_path = os.path.join(shimdir, "git")
+    with open(git_shim_path, "w") as f:
+        f.write(
+            "#!/bin/sh\n"
+            f'exec {quoted_real} -c "http.{base}.extraHeader=X-Credbroker-Agent: '
+            '$(credx --print-agent-header)" "$@"\n'
+        )
+    os.chmod(git_shim_path, 0o755)
+    print(f"wrote {git_shim_path}")
+
+    print("done; test with: CREDBROKER_SESSION_DESCRIPTION=me gh repo view PietroPasotti/credbroker")
 
 
 def build_parser() -> argparse.ArgumentParser:

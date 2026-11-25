@@ -8,8 +8,10 @@ prompt on the desktop (notify-send by default, or zenity).
 import base64
 import fnmatch
 import gzip
+import ipaddress
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -21,24 +23,44 @@ import urllib.request
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from credbroker import board
+
 HOME = os.path.expanduser("~")
 AUDIT_DIR = os.path.join(HOME, ".local/state/credbroker")
 AUDIT_PATH = os.path.join(AUDIT_DIR, "audit.jsonl")
 CREDX_PATH = os.path.join(os.path.dirname(__file__), "credx.py")
 
+DEFAULT_GUI_LISTEN = "127.0.0.1:8766"
+
 ALLOWED_ACTIONS = {"allow", "deny", "ask"}
-ALLOWED_TOP_KEYS = {"listen", "allowed_peers", "default", "prompt_timeout", "command_timeout", "prompt_backend", "exec", "git"}
+ALLOWED_TOP_KEYS = {
+    "listen",
+    "allowed_peers",
+    "default",
+    "prompt_timeout",
+    "command_timeout",
+    "prompt_backend",
+    "gui_listen",
+    "exec",
+    "git",
+    "peer_names",
+}
 ALLOWED_EXEC_KEYS = {"args", "action"}
 ALLOWED_GIT_KEYS = {"repo", "op", "refs", "action"}
+
+AGENT_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+AGENT_MAX_LEN = 160
 
 # GitHub caps PR/issue bodies at 65536 chars (<=262144 bytes of UTF-8); base64
 # inflates raw bytes by 4/3, plus JSON wrapper overhead — give real bodies room.
 EXEC_REQUEST_LIMIT = 400_000
 
 prompt_lock = threading.Lock()
-fetch_cache = {}  # (peer, repo) -> expiry epoch
+fetch_cache = {}  # (peer, agent, repo) -> expiry epoch
 fetch_cache_lock = threading.Lock()
 audit_lock = threading.Lock()
+
+BOARD = board.Board()
 
 
 class PolicyError(Exception):
@@ -50,14 +72,11 @@ def default_prompt_backend() -> str:
     return "notify-send" if shutil.which("notify-send") else "zenity"
 
 
-def load_policy(path: str) -> dict:
+def parse_policy(text: str, source: str) -> dict:
     try:
-        with open(path, "rb") as f:
-            policy = tomllib.load(f)
-    except FileNotFoundError:
-        raise PolicyError(f"policy file not found: {path}")
+        policy = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
-        raise PolicyError(f"invalid TOML in {path}: {e}")
+        raise PolicyError(f"invalid TOML in {source}: {e}")
 
     unknown = set(policy.keys()) - ALLOWED_TOP_KEYS
     if unknown:
@@ -78,6 +97,21 @@ def load_policy(path: str) -> dict:
         raise PolicyError(
             f"policy 'prompt_backend' must be 'zenity' or 'notify-send', got {policy['prompt_backend']!r}"
         )
+    policy.setdefault("gui_listen", DEFAULT_GUI_LISTEN)
+    gui_listen = policy["gui_listen"]
+    host, _, port = gui_listen.rpartition(":")
+    host = host.strip("[]")
+    loopback = False
+    if port.isdigit():
+        if host == "localhost":
+            loopback = True
+        else:
+            try:
+                loopback = ipaddress.ip_address(host).is_loopback
+            except ValueError:
+                loopback = False
+    if not loopback:
+        raise PolicyError(f"policy 'gui_listen' must be a loopback HOST:PORT, got {gui_listen!r}")
     policy.setdefault("exec", [])
     policy.setdefault("git", [])
 
@@ -101,7 +135,41 @@ def load_policy(path: str) -> dict:
         if rule["action"] not in ALLOWED_ACTIONS:
             raise PolicyError(f"invalid git rule action: {rule['action']!r}")
 
+    policy.setdefault("peer_names", {})
+    if not isinstance(policy["peer_names"], dict):
+        raise PolicyError("policy 'peer_names' must be a table")
+    for ip, label in policy["peer_names"].items():
+        try:
+            ipaddress.ip_address(ip)
+        except ValueError:
+            raise PolicyError(f"invalid peer_names key (not an IP): {ip!r}")
+        if not isinstance(label, str) or not label:
+            raise PolicyError(f"peer_names[{ip!r}] must be a non-empty string")
+
     return policy
+
+
+def load_policy(path: str) -> dict:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except FileNotFoundError:
+        raise PolicyError(f"policy file not found: {path}")
+    return parse_policy(text, path)
+
+
+def validate_runtime(policy: dict) -> None:
+    if shutil.which(policy["prompt_backend"]) is None:
+        raise PolicyError(f"prompt_backend {policy['prompt_backend']!r} not found on PATH")
+
+
+def sanitize_agent(v) -> str:
+    if not isinstance(v, str):
+        return "unknown:unknown"
+    cleaned = AGENT_CONTROL_CHARS_RE.sub("", v).strip()
+    if not cleaned:
+        return "unknown:unknown"
+    return cleaned[:AGENT_MAX_LEN]
 
 
 POLICY: dict = {}
@@ -112,10 +180,11 @@ def now_iso():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
-def audit(peer, kind, detail, decision, via, exit_code=None):
+def audit(peer, agent, kind, detail, decision, via, exit_code=None):
     entry = {
         "ts": now_iso(),
         "peer": peer,
+        "agent": agent,
         "kind": kind,
         "detail": detail,
         "decision": decision,
@@ -128,6 +197,7 @@ def audit(peer, kind, detail, decision, via, exit_code=None):
         os.makedirs(AUDIT_DIR, mode=0o700, exist_ok=True)
         with open(AUDIT_PATH, "a") as f:
             f.write(line + "\n")
+    BOARD.add_history(entry)
 
 
 def match_exec(args):
@@ -155,50 +225,77 @@ def match_git(repo, op, refs=None):
     return POLICY["default"], "default"
 
 
-def _prompt_zenity(summary):
-    result = subprocess.run(
-        [
-            "zenity",
-            "--question",
-            "--title=credbroker",
-            "--width=600",
-            "--no-markup",
-            f"--timeout={POLICY['prompt_timeout']}",
-            f"--text={summary}",
-        ],
-        timeout=POLICY["prompt_timeout"] + 10,
-    )
-    return result.returncode == 0
+def _zenity_argv(summary: str, timeout_s: int) -> list[str]:
+    return [
+        "zenity",
+        "--question",
+        "--title=credbroker",
+        "--width=600",
+        "--no-markup",
+        f"--timeout={timeout_s}",
+        f"--text={summary}",
+    ]
 
 
-def _prompt_notify_send(summary):
+def _notify_send_argv(summary: str, timeout_s: int) -> list[str]:
     # notify-send escapes HTML unless told otherwise; the notification server
     # here advertises body-markup, so escape attacker-controlled text ourselves.
     escaped = summary.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    result = subprocess.run(
-        [
-            "notify-send",
-            "--urgency=critical",
-            f"--expire-time={POLICY['prompt_timeout'] * 1000}",
-            "--action=allow=Allow",
-            "--action=deny=Deny",
-            "credbroker",
-            escaped,
-        ],
-        capture_output=True,
-        text=True,
-        timeout=POLICY["prompt_timeout"] + 10,
-    )
-    return result.stdout.strip() == "allow"
+    return [
+        "notify-send",
+        "--urgency=critical",
+        f"--expire-time={timeout_s * 1000}",
+        "--action=allow=Allow",
+        "--action=deny=Deny",
+        "credbroker",
+        escaped,
+    ]
 
 
-def do_prompt(summary):
-    backend = _prompt_notify_send if POLICY["prompt_backend"] == "notify-send" else _prompt_zenity
-    with prompt_lock:
-        try:
-            return backend(summary)
-        except Exception:
-            return False
+def _parse_zenity(returncode: int, stdout: str) -> bool:
+    return returncode == 0
+
+
+def _parse_notify_send(returncode: int, stdout: str) -> bool:
+    return stdout.strip() == "allow"
+
+
+def _desktop_prompt(item_id: int, summary: str, cancelled: threading.Event) -> None:
+    try:
+        with prompt_lock:
+            rem = BOARD.remaining(item_id)
+            if rem is None or rem < 1 or not BOARD.desktop_wanted():
+                return
+            if POLICY["prompt_backend"] == "notify-send":
+                argv_fn, parse_fn = _notify_send_argv, _parse_notify_send
+            else:
+                argv_fn, parse_fn = _zenity_argv, _parse_zenity
+            proc = subprocess.Popen(
+                argv_fn(summary, int(rem)),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            while proc.poll() is None:
+                if cancelled.wait(0.25):
+                    proc.terminate()
+                    proc.wait(5)
+                    return
+            BOARD.resolve(
+                [item_id],
+                "allow" if parse_fn(proc.returncode, proc.stdout.read()) else "deny",
+                via="prompt",
+            )
+    except Exception as e:
+        print(f"credbroker: desktop prompt failed: {e}", file=sys.stderr)
+
+
+def do_prompt(summary: str, *, peer: str, agent: str, kind: str, detail: dict) -> tuple[bool, str]:
+    timeout = POLICY["prompt_timeout"]
+    item_id, event = BOARD.open(peer=peer, agent=agent, kind=kind, detail=detail, timeout=timeout)
+    if BOARD.desktop_wanted():
+        threading.Thread(target=_desktop_prompt, args=(item_id, summary, event), daemon=True).start()
+    return BOARD.wait(item_id, timeout)
 
 
 def shell_quote_join(args):
@@ -212,30 +309,40 @@ def gh_stdin_kwargs(stdin_bytes):
     return {"input": stdin_bytes} if stdin_bytes is not None else {"stdin": subprocess.DEVNULL}
 
 
-def decide_exec(peer, args, reason, stdin_preview=None):
+def decide_exec(peer, agent, args, reason, stdin_preview=None):
     action, via = match_exec(args)
     if action == "ask":
-        summary_lines = [f"peer: {peer}", f"gh {shell_quote_join(args)}"]
+        summary_lines = [f"peer: {peer}", f"agent: {agent}", f"gh {shell_quote_join(args)}"]
         if stdin_preview:
             summary_lines.append(f"stdin: {stdin_preview}")
         if reason:
             summary_lines.append(f"reason: {reason}")
-        allowed = do_prompt("\n".join(summary_lines))
-        final = "allow" if allowed else "deny"
-        return final, "prompt"
+        allowed, via = do_prompt(
+            "\n".join(summary_lines),
+            peer=peer,
+            agent=agent,
+            kind="exec",
+            detail={"args": ["gh", *args], "reason": reason},
+        )
+        return ("allow" if allowed else "deny"), via
     return action, via
 
 
-def decide_git(peer, repo, op, refs=None):
+def decide_git(peer, agent, repo, op, refs=None):
     action, via = match_git(repo, op, refs)
     if action == "ask":
-        lines = [f"peer: {peer}", f"{op} {repo}"]
+        lines = [f"peer: {peer}", f"agent: {agent}", f"{op} {repo}"]
         if op == "push" and refs:
             for r in refs:
                 lines.append(r)
-        allowed = do_prompt("\n".join(lines))
-        final = "allow" if allowed else "deny"
-        return final, "prompt"
+        allowed, via = do_prompt(
+            "\n".join(lines),
+            peer=peer,
+            agent=agent,
+            kind="git",
+            detail={"repo": repo, "op": op, "refs": refs or []},
+        )
+        return ("allow" if allowed else "deny"), via
     return action, via
 
 
@@ -262,7 +369,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
-            audit(peer, "peer", {"path": self.path}, "deny", "peer-check")
+            audit(peer, None, "peer", {"path": self.path}, "deny", "peer-check")
             return False
         return True
 
@@ -364,16 +471,19 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             return self.send_text(400, "credbroker: bad request\n")
 
+        agent = sanitize_agent(req.get("agent"))
+
         rest = args[1:]
         if args[0] != "gh":
-            audit(peer, "exec", {"args": args}, "deny", "default")
+            audit(peer, agent, "exec", {"args": args}, "deny", "default")
             return self.send_json(403, {"error": "denied"})
 
         stdin_preview = stdin_bytes.decode("utf-8", "replace")[:500] if stdin_bytes else None
-        decision, via = decide_exec(peer, rest, reason, stdin_preview)
+        decision, via = decide_exec(peer, agent, rest, reason, stdin_preview)
         if decision != "allow":
             audit(
                 peer,
+                agent,
                 "exec",
                 {"args": args, "reason": reason, "stdin_bytes": len(stdin_bytes) if stdin_bytes is not None else 0},
                 "deny",
@@ -399,6 +509,7 @@ class Handler(BaseHTTPRequestHandler):
 
         audit(
             peer,
+            agent,
             "exec",
             {"args": args, "reason": reason, "stdin_bytes": len(stdin_bytes) if stdin_bytes is not None else 0},
             "allow",
@@ -425,6 +536,9 @@ class Handler(BaseHTTPRequestHandler):
             repo = repo[:-4]
         return owner, repo, rest
 
+    def request_agent(self):
+        return self.headers.get("X-Credbroker-Agent", "").strip()
+
     def handle_git_get(self):
         peer = self.client_address[0]
         parsed = self.parse_git_path()
@@ -432,25 +546,26 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_text(404, "not found\n")
         owner, repo, rest = parsed
         full_repo = f"{owner}/{repo}"
+        agent = sanitize_agent(self.request_agent())
         query = self.path.split("?", 1)[1] if "?" in self.path else ""
         if rest == "info/refs" and "service=git-upload-pack" in query:
-            decision, via = decide_git(peer, full_repo, "fetch")
+            decision, via = decide_git(peer, agent, full_repo, "fetch")
             if decision != "allow":
-                audit(peer, "git", {"repo": full_repo, "op": "fetch"}, "deny", via)
+                audit(peer, agent, "git", {"repo": full_repo, "op": "fetch"}, "deny", via)
                 return self.send_text(403, "credbroker: denied\n")
             with fetch_cache_lock:
-                fetch_cache[(peer, full_repo)] = time.time() + 60
-            audit(peer, "git", {"repo": full_repo, "op": "fetch"}, "allow", via)
+                fetch_cache[(peer, agent, full_repo)] = time.time() + 60
+            audit(peer, agent, "git", {"repo": full_repo, "op": "fetch"}, "allow", via)
             return self.forward_to_github("GET", owner, repo, rest, query)
         if rest == "info/refs" and "service=git-receive-pack" in query:
             push_rules = [r for r in POLICY["git"] if r["op"] == "push" and fnmatch.fnmatch(full_repo, r["repo"])]
             if push_rules and all(r["action"] == "deny" for r in push_rules):
-                audit(peer, "git", {"repo": full_repo, "op": "push-advertise"}, "deny", "rule")
+                audit(peer, agent, "git", {"repo": full_repo, "op": "push-advertise"}, "deny", "rule")
                 return self.send_text(403, "credbroker: denied\n")
             if not push_rules and POLICY["default"] == "deny":
-                audit(peer, "git", {"repo": full_repo, "op": "push-advertise"}, "deny", "default")
+                audit(peer, agent, "git", {"repo": full_repo, "op": "push-advertise"}, "deny", "default")
                 return self.send_text(403, "credbroker: denied\n")
-            audit(peer, "git", {"repo": full_repo, "op": "push-advertise"}, "allow", "rule")
+            audit(peer, agent, "git", {"repo": full_repo, "op": "push-advertise"}, "allow", "rule")
             return self.forward_to_github("GET", owner, repo, rest, query)
         return self.send_text(404, "not found\n")
 
@@ -461,34 +576,35 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_text(404, "not found\n")
         owner, repo, rest = parsed
         full_repo = f"{owner}/{repo}"
+        agent = sanitize_agent(self.request_agent())
         query = self.path.split("?", 1)[1] if "?" in self.path else ""
         body = self.read_body()
 
         if rest == "git-upload-pack":
             with fetch_cache_lock:
-                expiry = fetch_cache.get((peer, full_repo))
+                expiry = fetch_cache.get((peer, agent, full_repo))
                 cached = expiry is not None and expiry > time.time()
             if cached:
                 decision, via = "allow", "cache"
             else:
-                decision, via = decide_git(peer, full_repo, "fetch")
+                decision, via = decide_git(peer, agent, full_repo, "fetch")
                 if decision == "allow":
                     with fetch_cache_lock:
-                        fetch_cache[(peer, full_repo)] = time.time() + 60
+                        fetch_cache[(peer, agent, full_repo)] = time.time() + 60
             if decision != "allow":
-                audit(peer, "git", {"repo": full_repo, "op": "fetch"}, "deny", via)
+                audit(peer, agent, "git", {"repo": full_repo, "op": "fetch"}, "deny", via)
                 return self.send_text(403, "credbroker: denied\n")
-            audit(peer, "git", {"repo": full_repo, "op": "fetch"}, "allow", via)
+            audit(peer, agent, "git", {"repo": full_repo, "op": "fetch"}, "allow", via)
             return self.forward_to_github("POST", owner, repo, rest, query, body)
 
         if rest == "git-receive-pack":
             try:
                 refs = self.parse_receive_pack_refs(body)
             except Exception:
-                audit(peer, "git", {"repo": full_repo, "op": "push"}, "deny", "unparseable push")
+                audit(peer, agent, "git", {"repo": full_repo, "op": "push"}, "deny", "unparseable push")
                 return self.send_text(400, "credbroker: unparseable push\n")
             refnames = [r["refname"] for r in refs]
-            decision, via = decide_git(peer, full_repo, "push", refs=refnames)
+            decision, via = decide_git(peer, agent, full_repo, "push", refs=refnames)
             detail = {
                 "repo": full_repo,
                 "op": "push",
@@ -497,9 +613,9 @@ class Handler(BaseHTTPRequestHandler):
                 ],
             }
             if decision != "allow":
-                audit(peer, "git", detail, "deny", via)
+                audit(peer, agent, "git", detail, "deny", via)
                 return self.send_text(403, "credbroker: denied\n")
-            audit(peer, "git", detail, "allow", via)
+            audit(peer, agent, "git", detail, "allow", via)
             return self.forward_to_github("POST", owner, repo, rest, query, body)
 
         return self.send_text(404, "not found\n")
@@ -565,14 +681,76 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(resp_body)
 
 
+POLICY_PATH = ""
+POLICY_STATUS = {"path": "", "loaded_at": None, "error": None, "restart_required": False}
+STARTUP_LISTEN: tuple[str, str] = ("", "")
+_policy_sig = None
+reload_lock = threading.Lock()
+
+
+def _stat_sig(path):
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size, st.st_ino)
+
+
+def reload_policy() -> str | None:
+    global POLICY, _policy_sig
+    with reload_lock:
+        sig = _stat_sig(POLICY_PATH)
+        try:
+            new = load_policy(POLICY_PATH)
+            validate_runtime(new)
+        except PolicyError as e:
+            _policy_sig = sig
+            POLICY_STATUS["error"] = str(e)
+            print(f"credbroker: policy reload failed, keeping previous policy: {e}", file=sys.stderr)
+            return str(e)
+
+        POLICY = new
+        with fetch_cache_lock:
+            fetch_cache.clear()
+        _policy_sig = sig
+        restart_required = (new["listen"], new["gui_listen"]) != STARTUP_LISTEN
+        POLICY_STATUS.update(loaded_at=now_iso(), error=None, restart_required=restart_required)
+        print("credbroker: policy reloaded", file=sys.stderr)
+        if restart_required:
+            print("credbroker: listen/gui_listen changed; restart the unit to rebind", file=sys.stderr)
+        return None
+
+
+def watch_policy(stop: threading.Event, interval: float = 1.0) -> None:
+    while not stop.wait(interval):
+        sig = _stat_sig(POLICY_PATH)
+        if sig is not None and sig != _policy_sig:
+            reload_policy()
+
+
 def serve(policy_path: str) -> None:
-    global POLICY, GH
+    global POLICY, GH, POLICY_PATH, STARTUP_LISTEN, _policy_sig
+    POLICY_PATH = policy_path
+    _policy_sig = _stat_sig(policy_path)
     POLICY = load_policy(policy_path)
     GH = shutil.which("gh") or ""
     if not GH:
         raise PolicyError("gh not found on PATH")
-    if shutil.which(POLICY["prompt_backend"]) is None:
-        raise PolicyError(f"prompt_backend {POLICY['prompt_backend']!r} not found on PATH")
+    validate_runtime(POLICY)
+    STARTUP_LISTEN = (POLICY["listen"], POLICY["gui_listen"])
+    POLICY_STATUS.update(path=policy_path, loaded_at=now_iso())
+
+    from credbroker import gui
+
+    try:
+        gui_srv = gui.make_gui_server(POLICY["gui_listen"])
+    except OSError as e:
+        raise PolicyError(f"cannot bind gui_listen {POLICY['gui_listen']}: {e}")
+
+    threading.Thread(target=gui_srv.serve_forever, daemon=True).start()
+    threading.Thread(target=watch_policy, args=(threading.Event(),), daemon=True).start()
+    print(f"credbroker: web GUI on http://{POLICY['gui_listen']}", file=sys.stderr)
+
     host, _, port = POLICY["listen"].rpartition(":")
     server = ThreadingHTTPServer((host, int(port)), Handler)
     server.serve_forever()
