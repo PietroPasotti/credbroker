@@ -18,9 +18,20 @@ header {
   gap: 0.6rem 1rem;
 }
 
-header .hint,
 header .banner {
   flex-basis: 100%;
+}
+
+.section-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.6rem 1.5rem;
+}
+
+.section-header h2 {
+  margin: 0;
 }
 
 .policy-toggle {
@@ -39,12 +50,6 @@ header .banner {
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
-}
-
-.hint {
-  margin: 0.2rem 0 0.6rem;
-  color: #666;
-  font-size: 0.85rem;
 }
 
 .banner {
@@ -70,7 +75,6 @@ header .banner {
   display: flex;
   flex-wrap: wrap;
   gap: 1rem;
-  margin: 1rem 0;
 }
 
 .filters label {
