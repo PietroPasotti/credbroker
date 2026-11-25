@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """credx: client shim that forwards `gh` invocations to credbroker.
 
-Usage: credx [--reason TEXT] -- gh ARGS...
+Usage: credx [--agent NAME] [--reason TEXT] -- gh ARGS...
 Broker URL is resolved by broker_url(): env CREDBROKER_URL takes
 precedence, otherwise git config credbroker.url is used.
 """
@@ -12,6 +12,47 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+
+BODY_FILE_FLAGS = ("--body-file", "--notes-file", "-F")
+
+
+def extract_body_stdin(args):
+    """Rewrite the first --body-file/--notes-file/-F occurrence to read from
+    stdin, returning (possibly-rewritten args, raw body bytes or None).
+
+    Mirrors gh's own "-F -" contract: "-" means read local stdin (exactly what
+    unshimmed gh would do); any other value is a local file path that only
+    exists on this (client) host, so it must be read here and forwarded,
+    because the broker runs gh on a different machine. Only the --flag value /
+    --flag=value forms are recognized (no "-Fvalue" concatenated shorthand —
+    not seen in practice and ambiguous with other shorthand clusters).
+    """
+    for i, arg in enumerate(args):
+        flag = value = value_index = None
+        if arg in BODY_FILE_FLAGS and i + 1 < len(args):
+            flag, value, value_index = arg, args[i + 1], i + 1
+        elif "=" in arg:
+            head, _, tail = arg.partition("=")
+            if head in BODY_FILE_FLAGS:
+                flag, value, value_index = head, tail, i
+        if flag is None:
+            continue
+        if value == "-":
+            data = sys.stdin.buffer.read()
+        else:
+            try:
+                with open(value, "rb") as f:
+                    data = f.read()
+            except OSError as e:
+                print(f"credx: {e}", file=sys.stderr)
+                sys.exit(1)
+        new_args = list(args)
+        if value_index != i:
+            new_args[value_index] = "-"
+        else:
+            new_args[i] = f"{flag}=-"
+        return new_args, data
+    return args, None
 
 
 def broker_url() -> str:
@@ -40,29 +81,45 @@ def broker_url() -> str:
 
 def main():
     argv = sys.argv[1:]
+    agent = None
     reason = os.environ.get("CREDX_REASON")
 
-    if argv[:1] == ["--reason"]:
+    while argv[:1] in (["--agent"], ["--reason"]):
+        flag = argv[0]
         if len(argv) < 2:
-            print("credx: --reason requires a value", file=sys.stderr)
+            print(f"credx: {flag} requires a value", file=sys.stderr)
             sys.exit(125)
-        reason = argv[1]
+        if flag == "--agent":
+            agent = argv[1]
+        else:
+            reason = argv[1]
         argv = argv[2:]
 
     if argv[:1] != ["--"]:
-        print("credx: usage: credx [--reason TEXT] -- gh ARGS...", file=sys.stderr)
+        print("credx: usage: credx [--agent NAME] [--reason TEXT] -- gh ARGS...", file=sys.stderr)
         sys.exit(125)
     args = argv[1:]
 
     if not args:
-        print("credx: usage: credx [--reason TEXT] -- gh ARGS...", file=sys.stderr)
+        print("credx: usage: credx [--agent NAME] [--reason TEXT] -- gh ARGS...", file=sys.stderr)
         sys.exit(125)
 
+    agent = agent or os.environ.get("CREDBROKER_AGENT")
+    if not agent:
+        print(
+            "credx: agent name required; set CREDBROKER_AGENT or pass --agent NAME",
+            file=sys.stderr,
+        )
+        sys.exit(125)
+
+    args, stdin_bytes = extract_body_stdin(args)
     broker = broker_url()
 
-    payload = {"args": args}
+    payload = {"args": args, "agent": agent}
     if reason:
         payload["reason"] = reason
+    if stdin_bytes is not None:
+        payload["stdin"] = base64.b64encode(stdin_bytes).decode()
 
     data = json.dumps(payload).encode()
     req = urllib.request.Request(
@@ -79,7 +136,7 @@ def main():
         if e.code == 403:
             print("credx: denied by credbroker", file=sys.stderr)
             sys.exit(77)
-        print(f"credx: {e}", file=sys.stderr)
+        print(f"credx: {e}: {e.read().decode(errors='replace').strip()}", file=sys.stderr)
         sys.exit(125)
     except Exception as e:
         print(f"credx: {e}", file=sys.stderr)

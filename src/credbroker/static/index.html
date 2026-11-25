@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>credbroker</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header>
+  <h1>credbroker <span id="backend-badge" class="badge"></span></h1>
+  <label class="toggle">
+    <input type="checkbox" id="notify-toggle">
+    Desktop notifications while this page is open
+  </label>
+  <p class="hint">Desktop notifications always fire when no GUI page is open.</p>
+  <div id="error-banner" class="banner banner-error" hidden></div>
+  <div id="restart-banner" class="banner banner-warn" hidden>Listen address changed; restart the unit to rebind.</div>
+  <div id="conn-banner" class="banner banner-error" hidden>broker unreachable</div>
+</header>
+
+<section class="filters">
+  <label>Agent
+    <select id="filter-agent"><option value="all">all</option></select>
+  </label>
+  <label>Kind
+    <select id="filter-kind">
+      <option value="all">all</option>
+      <option value="exec">exec</option>
+      <option value="git">git</option>
+    </select>
+  </label>
+  <label>Decision
+    <select id="filter-decision">
+      <option value="all">all</option>
+      <option value="allow">allow</option>
+      <option value="deny">deny</option>
+    </select>
+  </label>
+  <label>Search
+    <input type="text" id="filter-search" placeholder="search...">
+  </label>
+</section>
+
+<section id="pending-section">
+  <h2>Pending</h2>
+  <button id="approve-all" type="button">Approve all (0)</button>
+  <table id="pending-table">
+    <thead>
+      <tr>
+        <th>waiting (s)</th>
+        <th>expires in (s)</th>
+        <th>agent</th>
+        <th>peer</th>
+        <th>kind</th>
+        <th>request</th>
+        <th></th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+</section>
+
+<section id="history-section">
+  <h2>History</h2>
+  <table id="history-table">
+    <thead>
+      <tr>
+        <th>ts</th>
+        <th>agent</th>
+        <th>peer</th>
+        <th>kind</th>
+        <th>request</th>
+        <th>decision</th>
+        <th>via</th>
+        <th>exit</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+</section>
+
+<section id="policy-section">
+  <h2>Policy</h2>
+  <textarea id="policy-text" rows="20" cols="100" spellcheck="false"></textarea>
+  <div class="policy-actions">
+    <button id="policy-save" type="button">Save</button>
+    <button id="policy-reload" type="button">Reload from disk</button>
+    <span id="policy-status"></span>
+  </div>
+</section>
+
+<script src="/app.js"></script>
+</body>
+</html>

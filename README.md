@@ -6,23 +6,34 @@ Policy-gated GitHub credential broker: `gh` and `git` for credential-less hosts.
 
 The trusted host keeps the GitHub token. Clients run `gh`/`git` normally,
 but every credentialed request is routed through the broker over HTTP.
-Each request is allowed, denied, or prompted on the trusted host's desktop
-according to `policy.toml` — by default a native notification with Allow/Deny
+Each request is allowed, denied, or prompted according to `policy.toml`,
+`ask` prompts default to a native desktop notification with Allow/Deny
 buttons (`notify-send`), falling back to a blocking `zenity` dialog if
-`notify-send` isn't installed; either can be forced explicitly.
+`notify-send` isn't installed; either can be forced explicitly. The broker
+also serves a loopback-only web GUI (default `127.0.0.1:8766`) with the
+same pending/history queue, a policy editor, and a toggle to suppress
+desktop notifications while the page is open — useful when several `ask`
+requests are in flight at once. `policy.toml` hot-reloads on save (from the
+GUI or any other editor); only `listen`/`gui_listen` changes need a restart.
+Every request carries a mandatory agent name (`CREDBROKER_AGENT`), shown
+next to each entry so you know which client-side agent is asking.
 
 ## Requirements
 
 - Both hosts are on the same tailnet, reachable by `tailscale ip -4 <hostname>`.
-- Trusted host: Linux desktop session with `$DISPLAY` set, `gh auth login` done,
-  `uv`, systemd user session, and a prompt backend: `notify-send`/
+- Trusted host: Linux desktop session with `gh auth login` done, `uv`,
+  systemd user session, and a prompt backend: `notify-send`/
   `libnotify-bin` is used automatically if present (needs a notification
   daemon that supports actions — GNOME Shell does), otherwise `zenity` is
   used — and (if `ufw` is active) passwordless `sudo ufw` for `init` to open
   the port itself, otherwise it prints the exact `ufw allow` command to run
-  manually.
-- Client: `uv` and `git`, and no GitHub credential (`gh auth logout` if one exists).
-  `~/.local/bin` must precede `/usr/bin` on `PATH` — true in login shells on Ubuntu.
+  manually. `$DISPLAY` is optional: without it, `ask` prompts are answered
+  from the web GUI instead of a desktop toast.
+- Client: `uv` and `git`, no GitHub credential (`gh auth logout` if one
+  exists), and `CREDBROKER_AGENT` set to a name identifying the calling
+  agent (`[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,63}`) — every request is rejected
+  without it. `~/.local/bin` must precede `/usr/bin` on `PATH` — true in
+  login shells on Ubuntu.
 
 ## Trusted host
 
@@ -49,9 +60,17 @@ uv tool install git+https://github.com/PietroPasotti/credbroker
 credbroker client-install --broker http://<broker-hostname-or-ip>:8765
 ```
 
-`client-install` prints `done; test with: gh repo view PietroPasotti/credbroker`
-— run it. A command denied by policy exits `77` with `credx: denied by
-credbroker` on stderr (e.g. `gh api` is denied by default, see Caveats).
+Set `CREDBROKER_AGENT` (e.g. in the shell profile or the calling agent's
+environment) to a name identifying the caller — every request is denied
+with `credx: agent name required; set CREDBROKER_AGENT or pass --agent
+NAME` until it's set. `client-install` also writes a `git` shim alongside
+the `gh` one, so plain `git fetch`/`push` over `insteadOf` carry the same
+agent name as an `X-Credbroker-Agent` header.
+
+`client-install` prints `done; test with: CREDBROKER_AGENT=me gh repo view
+PietroPasotti/credbroker` — run it. A command denied by policy exits `77`
+with `credx: denied by credbroker` on stderr (e.g. `gh api` is denied by
+default, see Caveats).
 
 ## Workshop container
 
@@ -72,6 +91,14 @@ plug.
   chmod 755 /usr/local/bin/credx
   printf '#!/bin/sh\nexec credx -- gh "$@"\n' > /usr/local/bin/gh
   chmod 755 /usr/local/bin/gh
+  cat <<SHIM > /usr/local/bin/git
+  #!/bin/sh
+  if [ -n "\$CREDBROKER_AGENT" ]; then
+    exec /usr/bin/git -c "http.$BROKER/git/.extraHeader=X-Credbroker-Agent: \$CREDBROKER_AGENT" "\$@"
+  fi
+  exec /usr/bin/git "\$@"
+  SHIM
+  chmod 755 /usr/local/bin/git
   git config --system credbroker.url "$BROKER"
   git config --system --unset-all url."$BROKER/git/".insteadOf || true
   git config --system url."$BROKER/git/".insteadOf https://github.com/
@@ -82,34 +109,58 @@ plug.
 
 Then `workshop refresh <name>`. The container's traffic reaches the broker
 from the client host's tailnet IP, so `allowed_peers` needs no change.
+Set `CREDBROKER_AGENT` in the container environment too.
 
 ## Policy reference
 
-- Keys: `listen`, `allowed_peers`, `default` (`deny|ask`), `prompt_timeout`, `command_timeout`, `prompt_backend` (`zenity|notify-send`).
+- Keys: `listen`, `gui_listen`, `allowed_peers`, `default` (`deny|ask`), `prompt_timeout`, `command_timeout`, `prompt_backend` (`zenity|notify-send`).
 - `init` generates a policy with `default = "deny"`, `prompt_timeout = 120`,
   `command_timeout = 300`, `prompt_backend` set to whatever `--prompt-backend`
   was passed, or auto-detected (`notify-send` if installed, else `zenity`),
-  a pre-seeded `[[git]]` fetch-allow rule for
+  `gui_listen = "127.0.0.1:8766"`, a pre-seeded `[[git]]` fetch-allow rule for
   `PietroPasotti/credbroker` itself (required so `uv tool upgrade` keeps
   working — see Upgrade below), plus starter `[[exec]]` rules for common
   read-only `gh` subcommands (`pr view/list/diff`, `issue view/list`, …). To
-  switch backends later, edit `prompt_backend` in `policy.toml` directly and
-  `systemctl --user restart credbroker` — no need to re-run `init --force`.
+  switch backends later, edit `prompt_backend` in `policy.toml` directly —
+  edits to `policy.toml` hot-reload within about a second, no restart needed
+  unless `listen`/`gui_listen` changed.
 - `[[exec]] args, action`: a prefix after `gh`.
 - `[[git]] repo` (fnmatch on `owner/name`), `op` (`fetch|push`), `refs` (push only), `action` (`allow|deny|ask`).
-- First match wins. Audit log: `~/.local/state/credbroker/audit.jsonl`.
+- First match wins. Audit log: `~/.local/state/credbroker/audit.jsonl`. The
+  web GUI's own in-memory history (last 500 decided requests) is separate
+  and not seeded from the audit log.
+
+## Web GUI
+
+`gui_listen` (default `127.0.0.1:8766`, loopback only) serves the approval
+queue: every pending `ask` FIFO with filter/search, per-item Approve/Deny
+and an "Approve all (N)" for the currently filtered rows, a history of
+decided requests, a `policy.toml` editor (saves hot-reload the running
+policy; a stale-on-disk save is rejected with 409), and the "Desktop
+notifications while this page is open" toggle (off by default — desktop
+notifications always fire while no GUI page is open; checking it fires
+both). There's no login: it's protected only by the loopback bind, a
+`Host` header check, and a custom header that forces a CORS preflight
+browsers never answer cross-origin. Reach it over SSH port-forwarding
+(`ssh -L 8766:127.0.0.1:8766 <trusted-host>`) if you're not on the box.
 
 ## Caveats
 
 - Plain HTTP over WireGuard, authenticated by source IP only.
 - `gh` output is buffered, so interactive `gh` (no flags, needing a TTY) won't work.
-- `ask` resolves to deny on timeout or when there is no display.
+- `ask` resolves to deny on timeout, or on dismissing/ignoring a desktop
+  toast until it expires. A desktop prompt that can't be shown at all (no
+  `$DISPLAY`, missing binary) no longer auto-denies: the request just waits
+  in the web GUI until `prompt_timeout`.
 - `gh api` is denied by default because it can do anything.
 - `prompt_backend = "notify-send"` needs a notification daemon advertising the
   `actions` capability (check with `dbus-send --session --print-reply
   --dest=org.freedesktop.Notifications /org/freedesktop/Notifications
   org.freedesktop.Notifications.GetCapabilities`); GNOME Shell has this, some
   minimal/tiling-WM notification daemons don't — fall back to `zenity` there.
+- Every request needs `CREDBROKER_AGENT` matching
+  `[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,63}`; without it the broker returns 400
+  before policy is even consulted.
 
 ## Upgrade
 
@@ -122,4 +173,8 @@ If `uv tool install`/`upgrade` on a client does not honor git `insteadOf`
 `GIT_CONFIG_GLOBAL=/dev/null`. The repo is public, so the direct fetch
 works. Either way, upgrading depends on the `PietroPasotti/credbroker`
 fetch-allow rule staying in `policy.toml` (see Policy reference) — don't
-remove it when editing the policy to taste.
+remove it when editing the policy to taste. If the upgrade instead fails
+with HTTP 400 (`credx: agent name required`) because `CREDBROKER_AGENT`
+isn't set in that shell, the same `GIT_CONFIG_GLOBAL=/dev/null` bypass
+works — it skips the broker (and its agent requirement) entirely for the
+public, read-only fetch.

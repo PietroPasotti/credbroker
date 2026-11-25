@@ -1,5 +1,6 @@
-# credbroker policy. First matching rule wins; otherwise "default". Restart after edits: systemctl --user restart credbroker
+# credbroker policy. First matching rule wins; otherwise "default". Hot-reloaded on save; changing listen/gui_listen needs: systemctl --user restart credbroker
 listen = "{listen}"
+gui_listen = "127.0.0.1:8766"
 allowed_peers = [{peers}]
 default = "deny"
 prompt_timeout = 120

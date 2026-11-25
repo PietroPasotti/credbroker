@@ -1,5 +1,6 @@
 """Tests for credbroker.cli client-install and credbroker.credx.broker_url."""
 import os
+import re
 import subprocess
 import sys
 
@@ -57,6 +58,19 @@ def test_client_install_idempotent(tmp_path):
     assert shim.read_text() == '#!/bin/sh\nexec credx -- gh "$@"\n'
     assert oct(shim.stat().st_mode)[-3:] == "755"
 
+    git_shim = home / ".local/bin/git"
+    git_shim_text = git_shim.read_text()
+    assert oct(git_shim.stat().st_mode)[-3:] == "755"
+    real_git_match = re.search(r"exec (\S+) -c", git_shim_text)
+    assert real_git_match is not None, git_shim_text
+    real_git_path = real_git_match.group(1)
+    assert not real_git_path.startswith(str(home / ".local/bin")), (
+        f"git shim resolved to itself: {real_git_path}"
+    )
+    assert 'if [ -n "$CREDBROKER_AGENT" ]; then' in git_shim_text
+    assert 'extraHeader=X-Credbroker-Agent: $CREDBROKER_AGENT" "$@"' in git_shim_text
+    assert f'http.{base}.extraHeader=X-Credbroker-Agent:' in git_shim_text
+
 
 def test_broker_url_env_takes_precedence(monkeypatch):
     monkeypatch.setenv("CREDBROKER_URL", "http://env-broker:8765")
@@ -69,4 +83,12 @@ def test_broker_url_exits_125_without_env_or_git_config(monkeypatch, tmp_path):
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
     with pytest.raises(SystemExit) as exc_info:
         credx.broker_url()
+    assert exc_info.value.code == 125
+
+
+def test_credx_main_exits_125_without_agent(monkeypatch):
+    monkeypatch.delenv("CREDBROKER_AGENT", raising=False)
+    monkeypatch.setattr(sys, "argv", ["credx", "--", "gh", "pr", "list"])
+    with pytest.raises(SystemExit) as exc_info:
+        credx.main()
     assert exc_info.value.code == 125
