@@ -1,4 +1,5 @@
 """Tests for credbroker.cli client-install and credbroker.credx.broker_url."""
+import io
 import os
 import re
 import subprocess
