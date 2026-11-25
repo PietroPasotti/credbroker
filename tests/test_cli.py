@@ -86,6 +86,74 @@ def test_broker_url_exits_125_without_env_or_git_config(monkeypatch, tmp_path):
     assert exc_info.value.code == 125
 
 
+class _FakeStdin:
+    def __init__(self, data: bytes):
+        self.buffer = io.BytesIO(data)
+
+
+def test_extract_body_stdin_dash_reads_stdin(monkeypatch):
+    monkeypatch.setattr(credx.sys, "stdin", _FakeStdin(b"## test body\nhello from stdin\n"))
+    args = ["pr", "create", "--body-file", "-", "--title", "x"]
+
+    new_args, data = credx.extract_body_stdin(args)
+
+    assert new_args == args
+    assert data == b"## test body\nhello from stdin\n"
+
+
+def test_extract_body_stdin_reads_local_file_separate_arg(tmp_path):
+    f = tmp_path / "body.md"
+    f.write_bytes(b"from a file\n")
+    args = ["pr", "create", "--body-file", str(f), "--title", "x"]
+
+    new_args, data = credx.extract_body_stdin(args)
+
+    assert new_args == ["pr", "create", "--body-file", "-", "--title", "x"]
+    assert data == b"from a file\n"
+
+
+def test_extract_body_stdin_reads_local_file_equals_form(tmp_path):
+    f = tmp_path / "body.md"
+    f.write_bytes(b"equals form\n")
+    args = ["pr", "create", f"--body-file={f}", "--title", "x"]
+
+    new_args, data = credx.extract_body_stdin(args)
+
+    assert new_args == ["pr", "create", "--body-file=-", "--title", "x"]
+    assert data == b"equals form\n"
+
+
+def test_extract_body_stdin_short_flag_separate_arg(tmp_path):
+    f = tmp_path / "body.md"
+    f.write_bytes(b"short flag\n")
+    args = ["pr", "comment", "123", "-F", str(f)]
+
+    new_args, data = credx.extract_body_stdin(args)
+
+    assert new_args == ["pr", "comment", "123", "-F", "-"]
+    assert data == b"short flag\n"
+
+
+def test_extract_body_stdin_missing_file_exits_1(tmp_path, capsys):
+    missing = tmp_path / "does-not-exist.md"
+    args = ["pr", "create", "--body-file", str(missing)]
+
+    with pytest.raises(SystemExit) as exc_info:
+        credx.extract_body_stdin(args)
+
+    assert exc_info.value.code == 1
+    assert str(missing) in capsys.readouterr().err
+
+
+def test_extract_body_stdin_no_flag_present_is_noop():
+    args = ["pr", "view", "123"]
+
+    new_args, data = credx.extract_body_stdin(args)
+
+    assert new_args == args
+    assert data is None
+
+
 def _clear_harness_env(monkeypatch):
     for var in ("OMPCODE", "CLAUDECODE", "CODEX_HOME", "GEMINI_CLI", "CREDBROKER_SESSION_DESCRIPTION"):
         monkeypatch.delenv(var, raising=False)
