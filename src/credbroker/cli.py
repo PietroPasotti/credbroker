@@ -86,7 +86,7 @@ def cmd_init(args: argparse.Namespace) -> None:
         print(
             "note: pass --force to regenerate from the template "
             f"(defaults: default=deny, prompt_timeout=120s, command_timeout=300s, "
-            f"prompt_backend={prompt_backend})"
+            f"audit_max_bytes=50MiB, prompt_backend={prompt_backend})"
         )
     else:
         os.makedirs(os.path.dirname(policy_path), exist_ok=True)
@@ -101,7 +101,7 @@ def cmd_init(args: argparse.Namespace) -> None:
             f.write(content)
         print(
             f"wrote {policy_path} (default=deny, prompt_timeout=120s, "
-            f"command_timeout=300s, prompt_backend={prompt_backend})"
+            f"command_timeout=300s, audit_max_bytes=50MiB, prompt_backend={prompt_backend})"
         )
 
     # 4. Unit file

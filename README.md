@@ -113,7 +113,7 @@ Optionally set `CREDBROKER_SESSION_DESCRIPTION` in the container environment too
 
 ## Policy reference
 
-- Keys: `listen`, `gui_listen`, `allowed_peers`, `default` (`deny|ask`), `prompt_timeout`, `command_timeout`, `prompt_backend` (`zenity|notify-send`), `peer_names` (optional `{ip = "label"}` table, purely cosmetic in the web GUI — doesn't affect `allowed_peers` enforcement or the raw IP stored in `audit.jsonl`).
+- Keys: `listen`, `gui_listen`, `allowed_peers`, `default` (`deny|ask`), `prompt_timeout`, `command_timeout`, `prompt_backend` (`zenity|notify-send`), `peer_names` (optional `{ip = "label"}` table, purely cosmetic in the web GUI — doesn't affect `allowed_peers` enforcement or the raw IP stored in `audit.jsonl`), `audit_max_bytes` (default 50 MiB; see below).
 - `init` generates a policy with `default = "deny"`, `prompt_timeout = 120`,
   `command_timeout = 300`, `prompt_backend` set to whatever `--prompt-backend`
   was passed, or auto-detected (`notify-send` if installed, else `zenity`),
@@ -126,9 +126,11 @@ Optionally set `CREDBROKER_SESSION_DESCRIPTION` in the container environment too
   unless `listen`/`gui_listen` changed.
 - `[[exec]] args, action`: a prefix after `gh`.
 - `[[git]] repo` (fnmatch on `owner/name`), `op` (`fetch|push`), `refs` (push only), `action` (`allow|deny|ask`).
-- First match wins. Audit log: `~/.local/state/credbroker/audit.jsonl`. The
-  web GUI's own in-memory history (last 500 decided requests) is separate
-  and not seeded from the audit log.
+- First match wins. Audit log: `~/.local/state/credbroker/audit.jsonl`,
+  rotated to a single `audit.jsonl.1` backup (overwriting any previous one)
+  once it reaches `audit_max_bytes` (default 50 MiB, i.e. 52428800). The web
+  GUI's own in-memory history (last 500 decided requests) is separate and
+  not seeded from the audit log.
 
 ## Web GUI
 

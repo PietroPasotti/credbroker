@@ -5,6 +5,9 @@ allowed_peers = [{peers}]
 default = "deny"
 prompt_timeout = 120
 command_timeout = 300
+# Rotate ~/.local/state/credbroker/audit.jsonl to a single .1 backup once it
+# reaches this size; defaults to 50 MiB if omitted.
+audit_max_bytes = 52428800
 prompt_backend = "{prompt_backend}"
 
 # Optional: friendly names shown in the web GUI next to raw peer IPs.

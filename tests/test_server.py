@@ -463,3 +463,50 @@ def test_parse_policy_rejects_non_string_peer_names_value():
     text = FIXTURE_TOML + '\n[peer_names]\n"10.0.0.1" = 123\n'
     with pytest.raises(server.PolicyError):
         server.parse_policy(text, "test")
+
+
+def test_parse_policy_defaults_audit_max_bytes_to_50mb():
+    policy = server.parse_policy(FIXTURE_TOML, "test")
+    assert policy["audit_max_bytes"] == 50 * 1024 * 1024
+
+
+def test_parse_policy_accepts_custom_audit_max_bytes(tmp_path):
+    p = tmp_path / "p.toml"
+    p.write_text('listen = "x:1"\ndefault = "deny"\naudit_max_bytes = 1000\n')
+    assert server.load_policy(str(p))["audit_max_bytes"] == 1000
+
+
+@pytest.mark.parametrize("value", [0, -1, "50mb", 1.5, True])
+def test_parse_policy_rejects_invalid_audit_max_bytes(tmp_path, value):
+    p = tmp_path / "p.toml"
+    toml_value = "true" if value is True else repr(value).replace("'", '"')
+    p.write_text(f'listen = "x:1"\ndefault = "deny"\naudit_max_bytes = {toml_value}\n')
+    with pytest.raises(server.PolicyError, match="audit_max_bytes"):
+        server.load_policy(str(p))
+
+
+def test_audit_rotates_log_once_it_exceeds_max_bytes(tmp_path, monkeypatch):
+    audit_path = tmp_path / "audit.jsonl"
+    monkeypatch.setattr(server, "AUDIT_DIR", str(tmp_path))
+    monkeypatch.setattr(server, "AUDIT_PATH", str(audit_path))
+    monkeypatch.setattr(server, "POLICY", {"audit_max_bytes": 100})
+    monkeypatch.setattr(server, "BOARD", board_module.Board())
+
+    for _ in range(20):
+        server.audit(peer="1.2.3.4", agent="a", kind="exec", detail={"args": ["x"]}, decision="allow", via="rule")
+
+    backup = tmp_path / "audit.jsonl.1"
+    assert backup.exists()
+    assert audit_path.stat().st_size < 100 + 300
+
+
+def test_audit_does_not_rotate_below_max_bytes(tmp_path, monkeypatch):
+    audit_path = tmp_path / "audit.jsonl"
+    monkeypatch.setattr(server, "AUDIT_DIR", str(tmp_path))
+    monkeypatch.setattr(server, "AUDIT_PATH", str(audit_path))
+    monkeypatch.setattr(server, "POLICY", {"audit_max_bytes": 50 * 1024 * 1024})
+    monkeypatch.setattr(server, "BOARD", board_module.Board())
+
+    server.audit(peer="1.2.3.4", agent="a", kind="exec", detail={"args": ["x"]}, decision="allow", via="rule")
+
+    assert not (tmp_path / "audit.jsonl.1").exists()

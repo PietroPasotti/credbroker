@@ -31,6 +31,7 @@ AUDIT_PATH = os.path.join(AUDIT_DIR, "audit.jsonl")
 CREDX_PATH = os.path.join(os.path.dirname(__file__), "credx.py")
 
 DEFAULT_GUI_LISTEN = "127.0.0.1:8766"
+DEFAULT_AUDIT_MAX_BYTES = 50 * 1024 * 1024
 
 ALLOWED_ACTIONS = {"allow", "deny", "ask"}
 ALLOWED_TOP_KEYS = {
@@ -44,6 +45,7 @@ ALLOWED_TOP_KEYS = {
     "exec",
     "git",
     "peer_names",
+    "audit_max_bytes",
 }
 ALLOWED_EXEC_KEYS = {"args", "action"}
 ALLOWED_GIT_KEYS = {"repo", "op", "refs", "action"}
@@ -146,6 +148,11 @@ def parse_policy(text: str, source: str) -> dict:
         if not isinstance(label, str) or not label:
             raise PolicyError(f"peer_names[{ip!r}] must be a non-empty string")
 
+    policy.setdefault("audit_max_bytes", DEFAULT_AUDIT_MAX_BYTES)
+    audit_max_bytes = policy["audit_max_bytes"]
+    if isinstance(audit_max_bytes, bool) or not isinstance(audit_max_bytes, int) or audit_max_bytes <= 0:
+        raise PolicyError(f"policy 'audit_max_bytes' must be a positive integer, got {audit_max_bytes!r}")
+
     return policy
 
 
@@ -195,9 +202,24 @@ def audit(peer, agent, kind, detail, decision, via, exit_code=None):
     line = json.dumps(entry)
     with audit_lock:
         os.makedirs(AUDIT_DIR, mode=0o700, exist_ok=True)
+        _rotate_audit_log_if_needed()
         with open(AUDIT_PATH, "a") as f:
             f.write(line + "\n")
     BOARD.add_history(entry)
+
+
+def _rotate_audit_log_if_needed():
+    """Move the audit log to a single ``.1`` backup once it reaches
+    ``audit_max_bytes``, starting a fresh log file. Caller holds audit_lock.
+    """
+    try:
+        size = os.path.getsize(AUDIT_PATH)
+    except FileNotFoundError:
+        return
+    max_bytes = POLICY.get("audit_max_bytes", DEFAULT_AUDIT_MAX_BYTES)
+    if size < max_bytes:
+        return
+    os.replace(AUDIT_PATH, AUDIT_PATH + ".1")
 
 
 def match_exec(args):
